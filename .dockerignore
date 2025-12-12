@@ -1,0 +1,36 @@
+# 忽略本地数据文件
+*.csv
+*.json
+*.png
+*.html
+
+# 忽略环境文件（敏感信息通过 Cloud Run 环境变量传入）
+.env
+*.json
+
+# 忽略 Git
+.git
+.gitignore
+
+# 忽略 Python 缓存
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+
+# 忽略虚拟环境
+venv
+.venv
+env
+
+# 忽略 IDE
+.idea
+.vscode
+*.swp
+
+# 忽略 Terraform
+terraform/
+*.tfstate*
+
+# 忽略文档
+README.md

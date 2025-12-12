@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 环境变量文件（包含敏感信息）
+.env
+
+# 数据文件
+*.csv
+*.json
+*.xlsx
+xmp_data_*
+
+# 调试文件
+*.png
+*.html
+login_error.png
+page_screenshot.png
+page_content.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Playwright
+playwright-report/
+test-results/
+nul
