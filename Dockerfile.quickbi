@@ -1,0 +1,27 @@
+# Quick BI 数据抓取 - Cloud Run Jobs 镜像
+# 轻量级镜像，不需要浏览器
+FROM python:3.11-slim
+
+# 设置工作目录
+WORKDIR /app
+
+# 安装依赖
+RUN pip install --no-cache-dir \
+    alibabacloud-quickbi-public20220101 \
+    alibabacloud-tea-openapi \
+    alibabacloud-tea-util \
+    python-dotenv \
+    google-cloud-storage \
+    google-cloud-bigquery
+
+# 复制代码文件
+COPY quickbi/test_quickbi.py ./quickbi_scraper.py
+COPY gcs_storage.py .
+COPY bigquery_storage.py .
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1
+ENV CLOUD_RUN=true
+
+# 运行脚本
+CMD ["python", "quickbi_scraper.py"]

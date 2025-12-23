@@ -1,21 +1,29 @@
 #!/bin/bash
-# XMP 数据爬虫 - Cloud Run Jobs 部署脚本
+# ADX (DataEye) 数据爬虫 - Cloud Run Jobs 部署脚本
+# 支持同时爬取海外版和国内版
 
 set -e
 
 # ============ 配置区域 ============
 PROJECT_ID="fleet-blend-469520-n7"
 REGION="asia-northeast3"  # 首尔，离中国近
-JOB_NAME="xmp-data-scraper"
+JOB_NAME="adx-data-scraper"
 IMAGE_NAME="gcr.io/${PROJECT_ID}/${JOB_NAME}"
 SERVICE_ACCOUNT="xmp-data-scraper@${PROJECT_ID}.iam.gserviceaccount.com"
 
 # 环境变量（敏感信息）
-XMP_USERNAME="violet@spoonlabs-partners.com"
-XMP_PASSWORD="M8NkLc8dyr"
+DATAEYE_USERNAME="katherine.withyang@gmail.com"
+DATAEYE_PASSWORD="3LB2c!C6HZ.9MJn"
 GCS_BUCKET_NAME="xmp_raw_data_storage"
 BQ_PROJECT_ID="${PROJECT_ID}"
-BQ_DATASET_ID="xmp_data"
+ADX_BQ_DATASET_ID="adx_data"
+
+# ADX 特定配置
+DATAEYE_VERSION="both"  # both=同时爬取海外版和国内版, overseas=仅海外版, china=仅国内版
+DATAEYE_MAX_RECORDS="100"
+DATAEYE_DATE_FILTER="today"
+DATAEYE_DOWNLOAD_VIDEOS="true"
+DATAEYE_UPLOAD_TO_GCS="true"
 
 # ============ 部署步骤 ============
 
@@ -30,42 +38,51 @@ gcloud services enable \
     artifactregistry.googleapis.com
 
 echo "=== 3. 构建并推送 Docker 镜像 ==="
-gcloud builds submit --tag ${IMAGE_NAME} .
+gcloud builds submit --tag ${IMAGE_NAME} --dockerfile Dockerfile.adx .
 
 echo "=== 4. 创建 Cloud Run Job ==="
 gcloud run jobs create ${JOB_NAME} \
     --image ${IMAGE_NAME} \
     --region ${REGION} \
     --service-account ${SERVICE_ACCOUNT} \
-    --memory 2Gi \
+    --memory 4Gi \
     --cpu 2 \
-    --task-timeout 30m \
+    --task-timeout 60m \
     --max-retries 1 \
-    --set-env-vars "XMP_USERNAME=${XMP_USERNAME}" \
-    --set-env-vars "XMP_PASSWORD=${XMP_PASSWORD}" \
+    --set-env-vars "DATAEYE_USERNAME=${DATAEYE_USERNAME}" \
+    --set-env-vars "DATAEYE_PASSWORD=${DATAEYE_PASSWORD}" \
     --set-env-vars "GCS_BUCKET_NAME=${GCS_BUCKET_NAME}" \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
-    --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
+    --set-env-vars "ADX_BQ_DATASET_ID=${ADX_BQ_DATASET_ID}" \
+    --set-env-vars "DATAEYE_VERSION=${DATAEYE_VERSION}" \
+    --set-env-vars "DATAEYE_MAX_RECORDS=${DATAEYE_MAX_RECORDS}" \
+    --set-env-vars "DATAEYE_DATE_FILTER=${DATAEYE_DATE_FILTER}" \
+    --set-env-vars "DATAEYE_DOWNLOAD_VIDEOS=${DATAEYE_DOWNLOAD_VIDEOS}" \
+    --set-env-vars "DATAEYE_UPLOAD_TO_GCS=${DATAEYE_UPLOAD_TO_GCS}" \
     --set-env-vars "CLOUD_RUN=true" \
     --quiet || \
 gcloud run jobs update ${JOB_NAME} \
     --image ${IMAGE_NAME} \
     --region ${REGION} \
     --service-account ${SERVICE_ACCOUNT} \
-    --memory 2Gi \
+    --memory 4Gi \
     --cpu 2 \
-    --task-timeout 30m \
+    --task-timeout 60m \
     --max-retries 1 \
-    --set-env-vars "XMP_USERNAME=${XMP_USERNAME}" \
-    --set-env-vars "XMP_PASSWORD=${XMP_PASSWORD}" \
+    --set-env-vars "DATAEYE_USERNAME=${DATAEYE_USERNAME}" \
+    --set-env-vars "DATAEYE_PASSWORD=${DATAEYE_PASSWORD}" \
     --set-env-vars "GCS_BUCKET_NAME=${GCS_BUCKET_NAME}" \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
-    --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
+    --set-env-vars "ADX_BQ_DATASET_ID=${ADX_BQ_DATASET_ID}" \
+    --set-env-vars "DATAEYE_VERSION=${DATAEYE_VERSION}" \
+    --set-env-vars "DATAEYE_MAX_RECORDS=${DATAEYE_MAX_RECORDS}" \
+    --set-env-vars "DATAEYE_DATE_FILTER=${DATAEYE_DATE_FILTER}" \
+    --set-env-vars "DATAEYE_DOWNLOAD_VIDEOS=${DATAEYE_DOWNLOAD_VIDEOS}" \
+    --set-env-vars "DATAEYE_UPLOAD_TO_GCS=${DATAEYE_UPLOAD_TO_GCS}" \
     --set-env-vars "CLOUD_RUN=true" \
     --quiet
 
-echo "=== 5. 创建 Cloud Scheduler 定时任务 ==="
-# 每天早上 9 点（北京时间）执行
+echo "=== 5. 创建 Cloud Scheduler 定时任务（每6小时执行一次）==="
 gcloud scheduler jobs create http ${JOB_NAME}-scheduler \
     --location ${REGION} \
     --schedule "0 */6 * * *" \
@@ -88,6 +105,8 @@ echo "=== 部署完成！ ==="
 echo ""
 echo "Cloud Run Job: https://console.cloud.google.com/run/jobs/details/${REGION}/${JOB_NAME}?project=${PROJECT_ID}"
 echo "Cloud Scheduler: https://console.cloud.google.com/cloudscheduler?project=${PROJECT_ID}"
+echo "BigQuery 数据: https://console.cloud.google.com/bigquery?project=${PROJECT_ID}&ws=!1m4!1m3!3m2!1s${PROJECT_ID}!2sadx_data"
+echo "GCS 视频: https://console.cloud.google.com/storage/browser/${GCS_BUCKET_NAME}/adx?project=${PROJECT_ID}"
 echo ""
 echo "手动执行一次测试："
 echo "  gcloud run jobs execute ${JOB_NAME} --region ${REGION}"

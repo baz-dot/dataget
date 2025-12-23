@@ -1,0 +1,21 @@
+# 忽略大文件和不需要的目录
+videos/
+*.mp4
+*.json
+!requirements.txt
+*.png
+*.log
+__pycache__/
+*.pyc
+.git/
+.env
+*.tar.gz
+deploy.tar.gz
+node_modules/
+.venv/
+venv/
+fleet-blend-469520-n7-1a29eac22376.json
+dataeye_cookies.json
+dataeye_responses.json
+dataeye_data_*.json
+debug_responses.json

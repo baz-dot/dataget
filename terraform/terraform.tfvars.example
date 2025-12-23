@@ -1,6 +1,0 @@
-# Terraform 变量配置示例
-# 复制此文件为 terraform.tfvars 并填写实际值
-
-project_id  = "your-gcp-project-id"
-region      = "asia-east1"
-environment = "dev"  # 或 "prod"

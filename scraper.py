@@ -22,7 +22,7 @@ if sys.platform == 'win32':
 class XMPScraper:
     """XMP 数据抓取器"""
 
-    def __init__(self, username: str, password: str, headless: bool = False):
+    def __init__(self, username: str, password: str, headless: bool = False, cookie_file: str = "xmp_cookies.json"):
         """
         初始化抓取器
 
@@ -30,10 +30,12 @@ class XMPScraper:
             username: 登录用户名
             password: 登录密码
             headless: 是否使用无头模式（不显示浏览器窗口）
+            cookie_file: Cookie 保存文件路径
         """
         self.username = username
         self.password = password
         self.headless = headless
+        self.cookie_file = cookie_file
         self.browser: Browser = None
         self.page: Page = None
 
@@ -53,9 +55,182 @@ class XMPScraper:
             self.playwright.stop()
         print("浏览器已关闭")
 
+    def _get_gcs_client(self):
+        """获取 GCS 客户端"""
+        try:
+            from google.cloud import storage
+            return storage.Client()
+        except ImportError:
+            return None
+        except Exception:
+            return None
+
+    def _upload_screenshot_to_gcs(self, local_path, gcs_path=None):
+        """上传截图到 GCS"""
+        try:
+            gcs_bucket = os.getenv('GCS_BUCKET_NAME')
+            if not gcs_bucket:
+                return False
+
+            client = self._get_gcs_client()
+            if not client:
+                return False
+
+            if not os.path.exists(local_path):
+                return False
+
+            bucket = client.bucket(gcs_bucket)
+            if gcs_path is None:
+                gcs_path = f'xmp/screenshots/{os.path.basename(local_path)}'
+            blob = bucket.blob(gcs_path)
+            blob.upload_from_filename(local_path)
+            print(f"  ✓ 截图已上传到 GCS: gs://{gcs_bucket}/{gcs_path}")
+            return True
+        except Exception as e:
+            print(f"  ⚠ 上传截图到 GCS 失败: {e}")
+            return False
+
+    def _save_cookies_to_gcs(self, cookies):
+        """保存 Cookie 到 GCS"""
+        try:
+            gcs_bucket = os.getenv('GCS_BUCKET_NAME')
+            if not gcs_bucket:
+                return False
+
+            client = self._get_gcs_client()
+            if not client:
+                return False
+
+            bucket = client.bucket(gcs_bucket)
+            blob = bucket.blob('xmp/cookies/xmp_cookies.json')
+            blob.upload_from_string(
+                json.dumps(cookies, ensure_ascii=False, indent=2),
+                content_type='application/json'
+            )
+            print(f"✓ Cookie 已保存到 GCS: gs://{gcs_bucket}/xmp/cookies/xmp_cookies.json")
+            return True
+        except Exception as e:
+            print(f"⚠ 保存 Cookie 到 GCS 失败: {e}")
+            return False
+
+    def _load_cookies_from_gcs(self):
+        """从 GCS 加载 Cookie"""
+        try:
+            gcs_bucket = os.getenv('GCS_BUCKET_NAME')
+            if not gcs_bucket:
+                return None
+
+            client = self._get_gcs_client()
+            if not client:
+                return None
+
+            bucket = client.bucket(gcs_bucket)
+            blob = bucket.blob('xmp/cookies/xmp_cookies.json')
+
+            if not blob.exists():
+                print(f"GCS 上不存在 Cookie 文件")
+                return None
+
+            content = blob.download_as_string()
+            cookies = json.loads(content)
+            print(f"✓ 从 GCS 加载了 {len(cookies)} 个 Cookie")
+            return cookies
+        except Exception as e:
+            print(f"⚠ 从 GCS 加载 Cookie 失败: {e}")
+            return None
+
+    def save_cookies(self):
+        """保存当前页面的 Cookie 到文件和 GCS"""
+        try:
+            cookies = self.page.context.cookies()
+            # 保存到本地文件
+            with open(self.cookie_file, 'w', encoding='utf-8') as f:
+                json.dump(cookies, f, ensure_ascii=False, indent=2)
+            print(f"✓ Cookie 已保存到 {self.cookie_file}")
+
+            # 同时保存到 GCS（如果在 Cloud Run 环境）
+            if os.getenv('CLOUD_RUN') or os.getenv('GCS_BUCKET_NAME'):
+                self._save_cookies_to_gcs(cookies)
+
+            return True
+        except Exception as e:
+            print(f"✗ 保存 Cookie 失败: {e}")
+            return False
+
+    def load_cookies(self):
+        """从文件或 GCS 加载 Cookie"""
+        cookies = None
+
+        # 优先从本地文件加载
+        try:
+            if os.path.exists(self.cookie_file):
+                with open(self.cookie_file, 'r', encoding='utf-8') as f:
+                    cookies = json.load(f)
+                if cookies:
+                    print(f"✓ 从本地文件加载了 {len(cookies)} 个 Cookie")
+        except Exception as e:
+            print(f"⚠ 从本地加载 Cookie 失败: {e}")
+
+        # 如果本地没有，尝试从 GCS 加载
+        if not cookies:
+            cookies = self._load_cookies_from_gcs()
+
+        if not cookies:
+            print("未找到可用的 Cookie")
+            return False
+
+        try:
+            # 添加 Cookie 到浏览器上下文
+            self.page.context.add_cookies(cookies)
+            print(f"✓ 已加载 {len(cookies)} 个 Cookie")
+            return True
+        except Exception as e:
+            print(f"✗ 加载 Cookie 失败: {e}")
+            return False
+
+    def login_with_cookies(self):
+        """尝试使用 Cookie 登录"""
+        print("尝试使用已保存的 Cookie 登录...")
+
+        # 先加载 Cookie
+        if not self.load_cookies():
+            return False
+
+        # 访问目标页面
+        target_url = "https://xmp.mobvista.com/ads_manage/summary/material"
+        print(f"正在访问: {target_url}")
+        self.page.goto(target_url, timeout=60000)
+
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=30000)
+        except:
+            pass
+        time.sleep(3)
+
+        # 检查是否登录成功
+        current_url = self.page.url
+        print(f"当前 URL: {current_url}")
+
+        if "login" not in current_url.lower():
+            print("✓ Cookie 登录成功！")
+            return True
+        else:
+            print("✗ Cookie 已过期或无效，需要重新登录")
+            return False
+
     def login(self):
-        """登录 XMP 平台"""
+        """登录 XMP 平台（优先使用 Cookie）"""
         print(f"正在登录 XMP 平台...")
+
+        # 优先尝试 Cookie 登录（本地文件或 GCS）
+        has_local_cookie = os.path.exists(self.cookie_file)
+        has_gcs_cookie = bool(os.getenv('GCS_BUCKET_NAME'))
+
+        if has_local_cookie or has_gcs_cookie:
+            print(f"尝试 Cookie 登录 (本地: {has_local_cookie}, GCS: {has_gcs_cookie})")
+            if self.login_with_cookies():
+                return True
+            print("Cookie 登录失败，尝试账号密码登录...")
 
         # 访问登录页面
         print("正在访问登录页面...")
@@ -191,9 +366,45 @@ class XMPScraper:
             # 保存登录后的截图用于调试
             self.page.screenshot(path="after_login.png")
             print("已保存登录后截图到 after_login.png")
+            # 上传截图到 GCS（用于 Cloud Run 调试）
+            self._upload_screenshot_to_gcs("after_login.png")
 
+            # 检查是否登录成功：URL 不含 login，或者页面包含登录成功的元素
+            login_success = False
+
+            # 方法1: 检查 URL
             if "login" not in current_url.lower():
+                print("✓ URL 检测：已离开登录页")
+                login_success = True
+
+            # 方法2: 检查页面是否有 Dashboard 元素（即使 URL 还是 login）
+            if not login_success:
+                print("URL 仍在登录页，检查页面内容...")
+                dashboard_selectors = [
+                    '.user-info',           # 用户信息区域
+                    '.dashboard',           # Dashboard 容器
+                    'text=Dashboard',       # Dashboard 文字
+                    'text=Reports',         # Reports 菜单
+                    '.ant-menu',            # Ant Design 菜单
+                    '.sidebar',             # 侧边栏
+                    'text=Sample Data Reports',  # 示例报告
+                    'text=Getting Started',      # 新手引导
+                ]
+                for selector in dashboard_selectors:
+                    try:
+                        if self.page.locator(selector).first.is_visible(timeout=2000):
+                            print(f"✓ 页面内容检测：找到 {selector}，登录成功")
+                            login_success = True
+                            break
+                    except:
+                        continue
+
+            if login_success:
                 print("登录成功！")
+
+                # 保存 Cookie 供下次使用
+                self.save_cookies()
+
                 # 导航到目标页面
                 target_url = "https://xmp.mobvista.com/ads_manage/summary/material"
                 print(f"正在跳转到目标页面: {target_url}")
@@ -412,50 +623,69 @@ class XMPScraper:
                 # 清空捕获的数据
                 captured_data = []
 
-                # 使用 expect_response 等待 API 响应
-                try:
-                    with self.page.expect_response(
-                        lambda resp: 'channel/list' in resp.url and resp.status == 200,
-                        timeout=15000
-                    ) as response_info:
-                        # 尝试点击下一页
-                        clicked = self._click_next_page(page)
-                        if not clicked:
-                            print("无法翻页，停止获取")
+                # 使用 expect_response 等待 API 响应，带重试机制
+                max_retries = 3
+                page_success = False
+                for retry in range(max_retries):
+                    try:
+                        with self.page.expect_response(
+                            lambda resp: 'channel/list' in resp.url and resp.status == 200,
+                            timeout=30000  # 增加到 30 秒
+                        ) as response_info:
+                            # 尝试点击下一页
+                            clicked = self._click_next_page(page)
+                            if not clicked:
+                                print("无法翻页，停止获取")
+                                break
+
+                        # 获取响应数据
+                        response = response_info.value
+                        try:
+                            json_data = response.json()
+                            page_records, _, current_page_size = self._extract_from_response(json_data)
+                            if page_records:
+                                print(f"第 {page} 页获取到 {len(page_records)} 条记录")
+                                all_records.extend(page_records)
+                                # 保存该页的完整响应
+                                all_pages_data.append({
+                                    "page": page,
+                                    "page_size": current_page_size,
+                                    "list": page_records,
+                                    "count": len(page_records)
+                                })
+                                consecutive_empty = 0
+                                page_success = True
+                                break  # 成功，跳出重试循环
+                            else:
+                                consecutive_empty += 1
+                                print(f"第 {page} 页无数据 (连续 {consecutive_empty} 页)")
+                                page_success = True
+                                break
+                        except Exception as e:
+                            print(f"解析响应失败: {e}")
+                            consecutive_empty += 1
+                            page_success = True
                             break
 
-                    # 获取响应数据
-                    response = response_info.value
-                    try:
-                        json_data = response.json()
-                        page_records, _, current_page_size = self._extract_from_response(json_data)
-                        if page_records:
-                            print(f"第 {page} 页获取到 {len(page_records)} 条记录")
-                            all_records.extend(page_records)
-                            # 保存该页的完整响应
-                            all_pages_data.append({
-                                "page": page,
-                                "page_size": current_page_size,
-                                "list": page_records,
-                                "count": len(page_records)
-                            })
-                            consecutive_empty = 0
-                        else:
-                            consecutive_empty += 1
-                            print(f"第 {page} 页无数据 (连续 {consecutive_empty} 页)")
                     except Exception as e:
-                        print(f"解析响应失败: {e}")
-                        consecutive_empty += 1
+                        print(f"等待API响应超时: {e} (重试 {retry + 1}/{max_retries})")
+                        if retry < max_retries - 1:
+                            time.sleep(3)  # 重试前等待
+                            # 刷新页面状态
+                            try:
+                                self.page.wait_for_load_state("networkidle", timeout=10000)
+                            except:
+                                pass
+                        continue
 
-                except Exception as e:
-                    print(f"等待API响应超时或失败: {e}")
-                    # 回退到原来的方式
+                # 如果所有重试都失败，使用备用方式
+                if not page_success:
+                    print(f"第 {page} 页所有重试失败，尝试备用方式")
                     time.sleep(3)
                     page_records, _, current_page_size = self._parse_api_response(captured_data)
                     if page_records:
                         print(f"第 {page} 页获取到 {len(page_records)} 条记录 (备用方式)")
                         all_records.extend(page_records)
-                        # 保存该页的完整响应
                         all_pages_data.append({
                             "page": page,
                             "page_size": current_page_size,
@@ -760,13 +990,17 @@ class XMPScraper:
                 if data:
                     self.save_data(data, format=save_format)
 
+                    # 生成批次 ID（时间戳格式）
+                    batch_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    print(f"\n=== 批次 ID: {batch_id} ===")
+
                     # 上传到 GCS
                     if upload_to_gcs and gcs_bucket:
-                        self._upload_to_gcs(gcs_bucket)
+                        self._upload_to_gcs(gcs_bucket, batch_id)
 
                     # 上传到 BigQuery
                     if upload_to_bq and bq_project and bq_dataset:
-                        self._upload_to_bigquery(bq_project, bq_dataset)
+                        self._upload_to_bigquery(bq_project, bq_dataset, batch_id)
                 else:
                     print("⚠ 未能提取到数据，请检查页面结构")
             else:
@@ -778,7 +1012,7 @@ class XMPScraper:
         finally:
             self.stop()
 
-    def _upload_to_gcs(self, bucket_name: str):
+    def _upload_to_gcs(self, bucket_name: str, batch_id: str = None):
         """上传 api_responses.json 到 GCS"""
         try:
             from gcs_storage import GCSUploader
@@ -787,18 +1021,21 @@ class XMPScraper:
             with open("api_responses.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # 上传到 GCS
+            # 上传到 GCS（使用批次 ID）
             uploader = GCSUploader(bucket_name)
-            blob_path = uploader.generate_xmp_blob_path("material")
+            blob_path = uploader.generate_xmp_blob_path("material", batch_id=batch_id)
             uploader.upload_json(data, blob_path)
+            print(f"✓ 已上传 JSON 数据到 GCS: gs://{bucket_name}/{blob_path}")
 
         except ImportError:
             print("⚠ 未安装 google-cloud-storage，跳过 GCS 上传")
         except Exception as e:
+            import traceback
             print(f"✗ GCS 上传失败: {e}")
+            traceback.print_exc()
 
-    def _upload_to_bigquery(self, project_id: str, dataset_id: str):
-        """上传数据到 BigQuery"""
+    def _upload_to_bigquery(self, project_id: str, dataset_id: str, batch_id: str = None):
+        """上传数据到 BigQuery（追加模式）"""
         try:
             from bigquery_storage import BigQueryUploader
 
@@ -806,10 +1043,13 @@ class XMPScraper:
             with open("api_responses.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # 上传到 BigQuery
+            # 上传到 BigQuery（追加到固定表，用 batch_id 字段区分批次）
             uploader = BigQueryUploader(project_id, dataset_id)
-            count = uploader.upload_xmp_materials(data)
-            print(f"✓ 已上传 {count} 条记录到 BigQuery")
+            count = uploader.upload_xmp_materials(data, batch_id=batch_id)
+            print(f"✓ 已追加 {count} 条记录到 BigQuery")
+            print(f"  表: {dataset_id}.xmp_materials")
+            if batch_id:
+                print(f"  批次 ID: {batch_id}")
 
         except ImportError:
             print("⚠ 未安装 google-cloud-bigquery，跳过 BigQuery 上传")
@@ -817,10 +1057,68 @@ class XMPScraper:
             print(f"✗ BigQuery 上传失败: {e}")
 
 
+def save_cookies_manually():
+    """手动登录并保存 Cookie 的模式"""
+    load_dotenv()
+
+    username = os.getenv('XMP_USERNAME', '')
+    password = os.getenv('XMP_PASSWORD', '')
+
+    scraper = XMPScraper(
+        username=username,
+        password=password,
+        headless=False  # 必须显示浏览器
+    )
+
+    try:
+        scraper.start()
+
+        # 访问登录页面
+        print(f"正在打开 XMP 平台...")
+        scraper.page.goto("https://xmp.mobvista.com/m/login", timeout=60000)
+
+        print("\n" + "=" * 60)
+        print("请在浏览器中手动完成登录")
+        print("=" * 60)
+        print("步骤：")
+        print("  1. 输入用户名和密码")
+        print("  2. 完成验证码（如果有）")
+        print("  3. 点击登录按钮")
+        print("  4. 等待页面跳转到目标页面")
+        print("\n登录成功后，按 Enter 键保存 Cookie...")
+        print("=" * 60 + "\n")
+
+        input(">>> 按 Enter 键保存 Cookie...")
+
+        # 检查是否登录成功
+        current_url = scraper.page.url
+        print(f"当前 URL: {current_url}")
+
+        if "login" not in current_url.lower():
+            scraper.save_cookies()
+            print("\n✓ Cookie 保存成功！下次运行时将自动使用 Cookie 登录。")
+        else:
+            print("\n⚠ 似乎还未登录成功，是否仍要保存 Cookie？")
+            confirm = input("输入 y 保存，其他键取消: ")
+            if confirm.lower() == 'y':
+                scraper.save_cookies()
+
+    except Exception as e:
+        print(f"出错: {e}")
+    finally:
+        input("\n按 Enter 键关闭浏览器...")
+        scraper.stop()
+
+
 def main():
     """主函数"""
     # 加载环境变量
     load_dotenv()
+
+    # 检查命令行参数
+    if len(sys.argv) > 1 and sys.argv[1] == '--save-cookies':
+        save_cookies_manually()
+        return
 
     # 从环境变量获取登录信息
     username = os.getenv('XMP_USERNAME')

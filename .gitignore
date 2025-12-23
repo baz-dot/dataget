@@ -50,3 +50,13 @@ page_content.html
 playwright-report/
 test-results/
 nul
+
+# Videos and large files
+videos/
+*.mp4
+*.tar.gz
+deploy.tar.gz
+
+# GCP credentials
+*.json
+!cloudbuild*.yaml

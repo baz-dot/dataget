@@ -1,3 +1,4 @@
+# ADX (DataEye) 数据爬虫 - Cloud Run Jobs 镜像
 # 使用 Playwright 官方镜像（包含浏览器）
 FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
@@ -14,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir google-cloud-storage google-cloud-bigquery
 
 # 复制代码文件
-COPY scraper.py .
+COPY dataeye_scraper.py .
 COPY gcs_storage.py .
 COPY bigquery_storage.py .
 
@@ -23,4 +24,4 @@ ENV PYTHONUNBUFFERED=1
 ENV CLOUD_RUN=true
 
 # 运行爬虫（headless 模式）
-CMD ["python", "scraper.py"]
+CMD ["python", "dataeye_scraper.py"]

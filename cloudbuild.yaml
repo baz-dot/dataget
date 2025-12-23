@@ -1,0 +1,5 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/fleet-blend-469520-n7/adx-data-scraper', '-f', 'Dockerfile.adx', '.']
+images:
+  - 'gcr.io/fleet-blend-469520-n7/adx-data-scraper'
