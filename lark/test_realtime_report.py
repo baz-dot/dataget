@@ -12,7 +12,7 @@ from lark.lark_bot import LarkBot
 from bigquery_storage import BigQueryUploader
 
 # 配置
-webhook_url = os.getenv('LARK_WEBHOOK_URL', 'https://open.larksuite.com/open-apis/bot/v2/hook/25092ba0-5569-4be4-8fad-d64047dfedbf')
+webhook_url = os.getenv('LARK_WEBHOOK_URL', 'https://open.larksuite.com/open-apis/bot/v2/hook/df0f480c-d0ac-43b0-bfc0-2531ce27c735')
 secret = os.getenv('LARK_SECRET') or None
 project_id = os.getenv('BQ_PROJECT_ID')
 
@@ -72,7 +72,16 @@ else:
     print("  暂无上小时快照数据")
 
 print(f"\n[3] 发送实时播报到飞书...")
-bot = LarkBot(webhook_url=webhook_url, secret=secret)
+# 获取 API Key
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+chatgpt_api_key = os.getenv("OPENAI_API_KEY") or gemini_api_key
+
+bot = LarkBot(
+    webhook_url=webhook_url,
+    secret=secret,
+    gemini_api_key=gemini_api_key,
+    chatgpt_api_key=chatgpt_api_key
+)
 
 # 传入 prev_data 用于计算环比
 result = bot.send_realtime_report(data=realtime_data, prev_data=prev_snapshot)

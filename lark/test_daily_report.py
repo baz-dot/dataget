@@ -12,7 +12,7 @@ from lark.lark_bot import LarkBot, Daily_Job
 from bigquery_storage import BigQueryUploader
 
 # 配置
-webhook_url = os.getenv('LARK_WEBHOOK_URL', 'https://open.larksuite.com/open-apis/bot/v2/hook/25092ba0-5569-4be4-8fad-d64047dfedbf')
+webhook_url = os.getenv('LARK_WEBHOOK_URL', 'https://open.larksuite.com/open-apis/bot/v2/hook/df0f480c-d0ac-43b0-bfc0-2531ce27c735')
 secret = os.getenv('LARK_SECRET') or None
 bi_link = os.getenv('DAILY_REPORT_BI_LINK', 'https://bi.aliyun.com/product/vigloo.htm?menuId=f438317d-6f93-4561-8fb2-e85bf2e9aea8')
 project_id = os.getenv('BQ_PROJECT_ID')

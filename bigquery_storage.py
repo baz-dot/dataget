@@ -1037,6 +1037,7 @@ class BigQueryUploader:
             batch_time_str = batch_id.replace('_', '')
             api_update_time = datetime.strptime(batch_time_str, '%Y%m%d%H%M%S')
             result["api_update_time"] = api_update_time.strftime('%Y-%m-%d %H:%M:%S')
+            result["batch_time"] = api_update_time.strftime('%H:%M')  # 当前batch时间点
 
             # 检查数据延迟 (超过2小时)
             time_diff = datetime.now() - api_update_time
@@ -1304,9 +1305,9 @@ class BigQueryUploader:
         table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
         now = datetime.now()
 
-        # 一小时前的时间窗口：45分钟到75分钟之间
-        one_hour_ago_start = now - timedelta(minutes=75)
-        one_hour_ago_end = now - timedelta(minutes=45)
+        # 一小时前的时间窗口：2分钟到10分钟之间 (测试用，正式改回 45-75)
+        one_hour_ago_start = now - timedelta(minutes=10)
+        one_hour_ago_end = now - timedelta(minutes=2)
 
         # 优先查找一小时前时间窗口内的快照
         query = f"""
@@ -1334,33 +1335,159 @@ class BigQueryUploader:
         except Exception as e:
             print(f"查询1小时前快照失败: {e}")
 
-        # 如果没有找到一小时前的快照，回退到查找最近一条（排除最近10分钟内的）
-        ten_minutes_ago = now - timedelta(minutes=10)
-        fallback_query = f"""
-        SELECT *
+        # 没有找到1小时前的快照，返回 None
+        print("[快照] 未找到1小时前快照")
+        return None
+
+    def get_previous_batch_data(self, table_id: str = "quickbi_campaigns", dataset_id: str = "quickbi_data") -> Dict[str, Any]:
+        """
+        获取上一个 batch 的汇总数据（用于计算小时环比）
+
+        直接从 BigQuery 查询，不依赖快照表
+
+        Returns:
+            上一个 batch 的汇总数据，包含 total_spend, d0_roas, optimizer_data
+        """
+        from datetime import datetime
+
+        today = datetime.now().strftime('%Y-%m-%d')
+        table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
+
+        # 获取当日所有 batch_id，按时间倒序
+        batch_query = f"""
+        SELECT DISTINCT batch_id
         FROM `{table_ref}`
-        WHERE snapshot_time < '{ten_minutes_ago.strftime('%Y-%m-%d %H:%M:%S')}'
-        ORDER BY snapshot_time DESC
+        WHERE stat_date = '{today}'
+        ORDER BY batch_id DESC
+        LIMIT 2
+        """
+
+        try:
+            batch_ids = [row.batch_id for row in self.client.query(batch_query).result()]
+
+            if len(batch_ids) < 2:
+                print("[环比] 当日只有1个batch，无法计算环比")
+                return None
+
+            # 使用第二新的 batch（上一个小时的数据）
+            prev_batch_id = batch_ids[1]
+            print(f"[环比] 使用上一个batch: {prev_batch_id}")
+
+            # 解析 batch_id 获取时间点 (格式: 20251224_080035)
+            batch_time_str = None
+            try:
+                batch_time = datetime.strptime(prev_batch_id, '%Y%m%d_%H%M%S')
+                batch_time_str = batch_time.strftime('%H:%M')
+            except:
+                pass
+
+            # 查询上一个 batch 的汇总数据
+            summary_query = f"""
+            SELECT
+                SUM(spend) as total_spend,
+                SUM(new_user_revenue) as total_revenue,
+                SAFE_DIVIDE(SUM(new_user_revenue), SUM(spend)) as d0_roas
+            FROM `{table_ref}`
+            WHERE stat_date = '{today}' AND batch_id = '{prev_batch_id}'
+            """
+
+            result = {"total_spend": 0, "d0_roas": 0, "optimizer_data": [], "batch_time": batch_time_str, "batch_id": prev_batch_id}
+
+            for row in self.client.query(summary_query).result():
+                result["total_spend"] = float(row.total_spend or 0)
+                result["d0_roas"] = float(row.d0_roas or 0)
+
+            # 查询上一个 batch 的分投手数据
+            optimizer_query = f"""
+            SELECT
+                optimizer,
+                SUM(spend) as spend
+            FROM `{table_ref}`
+            WHERE stat_date = '{today}' AND batch_id = '{prev_batch_id}'
+              AND optimizer IS NOT NULL AND optimizer != ''
+            GROUP BY optimizer
+            """
+
+            for row in self.client.query(optimizer_query).result():
+                result["optimizer_data"].append({
+                    "optimizer": row.optimizer,
+                    "spend": float(row.spend or 0)
+                })
+
+            return result
+
+        except Exception as e:
+            print(f"[环比] 查询上一个batch失败: {e}")
+            return None
+
+    def query_yesterday_same_hour_data(self, table_id: str = "quickbi_campaigns", dataset_id: str = "quickbi_data") -> Dict[str, Any]:
+        """
+        查询昨日同时段数据（用于同比校验）
+
+        Returns:
+            昨日同时段的汇总数据
+        """
+        from datetime import datetime, timedelta
+
+        now = datetime.now()
+        yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+        current_hour = now.hour
+
+        table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
+
+        # 查找昨日对应小时的 batch_id (格式: 20251223_100033)
+        batch_query = f"""
+        SELECT batch_id
+        FROM `{table_ref}`
+        WHERE stat_date = '{yesterday}'
+          AND CAST(SUBSTR(batch_id, 10, 2) AS INT64) = {current_hour}
+        ORDER BY batch_id DESC
         LIMIT 1
         """
 
         try:
-            for row in self.client.query(fallback_query).result():
-                print(f"[快照] 未找到1小时前快照，使用最近快照: {row.snapshot_time}")
-                return {
-                    "snapshot_time": str(row.snapshot_time),
-                    "stat_date": str(row.stat_date),
-                    "hour": row.hour,
-                    "total_spend": float(row.total_spend or 0),
-                    "total_revenue": float(row.total_revenue or 0),
-                    "d0_roas": float(row.d0_roas or 0),
-                    "optimizer_data": json.loads(row.optimizer_data) if row.optimizer_data else [],
-                    "batch_id": row.batch_id
-                }
-        except Exception as e:
-            print(f"获取最近快照失败: {e}")
+            batch_ids = [row.batch_id for row in self.client.query(batch_query).result()]
 
-        return None
+            if not batch_ids:
+                print(f"[同比] 未找到昨日 {current_hour}:00 的数据")
+                return None
+
+            batch_id = batch_ids[0]
+            print(f"[同比] 使用昨日batch: {batch_id}")
+
+            # 查询昨日同时段汇总数据
+            summary_query = f"""
+            SELECT
+                SUM(spend) as total_spend,
+                SUM(new_user_revenue) as total_revenue,
+                SAFE_DIVIDE(SUM(new_user_revenue), SUM(spend)) as d0_roas,
+                COUNT(DISTINCT optimizer) as optimizer_count,
+                COUNT(DISTINCT campaign_id) as campaign_count
+            FROM `{table_ref}`
+            WHERE stat_date = '{yesterday}' AND batch_id = '{batch_id}'
+            """
+
+            result = {
+                "date": yesterday,
+                "hour": current_hour,
+                "batch_id": batch_id,
+                "total_spend": 0,
+                "d0_roas": 0,
+                "optimizer_count": 0,
+                "campaign_count": 0
+            }
+
+            for row in self.client.query(summary_query).result():
+                result["total_spend"] = float(row.total_spend or 0)
+                result["d0_roas"] = float(row.d0_roas or 0)
+                result["optimizer_count"] = int(row.optimizer_count or 0)
+                result["campaign_count"] = int(row.campaign_count or 0)
+
+            return result
+
+        except Exception as e:
+            print(f"[同比] 查询昨日数据失败: {e}")
+            return None
 
 
 def upload_xmp_to_bigquery(data: dict, project_id: str, dataset_id: str,

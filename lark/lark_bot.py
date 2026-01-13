@@ -24,6 +24,19 @@ except ImportError:
         GeminiAdvisor = None
         create_advisor = None
 
+# 尝试导入 ChatGPT Advisor
+try:
+    from .chatgpt_advisor import ChatGPTAdvisor, create_chatgpt_advisor
+    CHATGPT_AVAILABLE = True
+except ImportError:
+    try:
+        from chatgpt_advisor import ChatGPTAdvisor, create_chatgpt_advisor
+        CHATGPT_AVAILABLE = True
+    except ImportError:
+        CHATGPT_AVAILABLE = False
+        ChatGPTAdvisor = None
+        create_chatgpt_advisor = None
+
 
 # 优化师 -> 飞书 open_id 映射表 (需要配置)
 OPTIMIZER_USER_MAP: Dict[str, str] = {
@@ -109,7 +122,7 @@ class LarkBot:
     """飞书机器人播报类"""
 
     def __init__(self, webhook_url: str, secret: str = None, config: Dict[str, Any] = None,
-                 gemini_api_key: str = None):
+                 gemini_api_key: str = None, chatgpt_api_key: str = None):
         """
         初始化飞书机器人
 
@@ -120,23 +133,34 @@ class LarkBot:
                 - roas_green_threshold: ROAS 绿色阈值 (默认 0.40)
                 - roas_yellow_threshold: ROAS 黄色阈值 (默认 0.30)
             gemini_api_key: Gemini API Key（可选，用于 AI 策略建议）
+            chatgpt_api_key: ChatGPT API Key（可选，用于 AI 智能分析）
         """
         self.webhook_url = webhook_url
         self.secret = secret
         # 合并默认配置和用户配置
         self.config = {**DEFAULT_CONFIG, **(config or {})}
 
+        import os
+
         # 初始化 Gemini Advisor
         self.gemini_advisor = None
         if GEMINI_AVAILABLE:
             try:
-                # 优先使用传入的 key，其次从 config，最后从环境变量
-                import os
                 api_key = gemini_api_key or (config and config.get("gemini_api_key")) or os.getenv("GEMINI_API_KEY")
                 if api_key:
                     self.gemini_advisor = create_advisor(api_key)
             except Exception:
-                pass  # Gemini 初始化失败，使用规则降级
+                pass
+
+        # 初始化 ChatGPT Advisor
+        self.chatgpt_advisor = None
+        if CHATGPT_AVAILABLE:
+            try:
+                api_key = chatgpt_api_key or (config and config.get("chatgpt_api_key")) or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
+                if api_key:
+                    self.chatgpt_advisor = create_chatgpt_advisor(api_key)
+            except Exception:
+                pass
 
     def _gen_sign(self, timestamp: str) -> str:
         """生成签名"""
@@ -541,6 +565,28 @@ class LarkBot:
         if test_drama_text:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• ⚠️ 测剧建议：{test_drama_text}"}})
 
+        # ========== 板块 2.5: ChatGPT 智能分析 ==========
+        if self.chatgpt_advisor:
+            try:
+                ai_analysis = self.chatgpt_advisor.analyze_daily_data(data)
+
+                # 核心洞察
+                key_insights = ai_analysis.get("key_insights", "")
+                if key_insights:
+                    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 🤖 AI洞察：{key_insights}"}})
+
+                # 异常点
+                anomalies = ai_analysis.get("anomalies", [])
+                for anomaly in anomalies[:2]:
+                    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• ⚠️ {anomaly}"}})
+
+                # 机会
+                opportunities = ai_analysis.get("opportunities", [])
+                for opp in opportunities[:2]:
+                    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 💎 {opp}"}})
+            except Exception as e:
+                pass  # ChatGPT 分析失败，静默跳过
+
         elements.append({"tag": "hr"})
 
         # ========== 板块 3: 投手排行榜 ==========
@@ -585,6 +631,7 @@ class LarkBot:
             })
         elements.append({
             "tag": "table",
+            "page_size": 20,
             "columns": [
                 {"name": "optimizer", "display_name": "投手"},
                 {"name": "spend", "display_name": "消耗"},
@@ -1281,10 +1328,13 @@ class LarkBot:
 
         # 过去1小时新增消耗 (仅当有上小时数据时显示)
         if prev_data and prev_data.get("total_spend", 0) > 0:
+            current_batch_time = data.get("batch_time", "")
+            prev_batch_time = prev_data.get("batch_time", "")
+            time_label = f"({current_batch_time} vs {prev_batch_time})" if current_batch_time and prev_batch_time else ""
             spend_emoji = "🔥" if hourly_spend_change_pct > 10 else "📊"
             elements.append({
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": f"• 过去1小时新增消耗：**${hourly_spend_delta:,.2f}** ({spend_emoji} 较上小时 {hourly_spend_change_pct:+.0f}%)"}
+                "text": {"tag": "lark_md", "content": f"• 新增消耗 {time_label}：**${hourly_spend_delta:,.2f}** ({spend_emoji} {hourly_spend_change_pct:+.0f}%)"}
             })
 
             # ROAS 趋势
@@ -1294,8 +1344,8 @@ class LarkBot:
                 "text": {"tag": "lark_md", "content": f"• 过去1小时 ROAS 趋势：{roas_emoji} {abs(roas_trend):.1%}"}
             })
         else:
-            # 没有上小时数据时，显示今日累计信息
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "• 📌 今日首次播报，环比数据将在下一小时显示"}})
+            # 没有上小时快照数据
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "• ⚠️ 上小时快照缺失，无法计算环比数据"}})
 
         elements.append({"tag": "hr"})
 
@@ -1303,7 +1353,7 @@ class LarkBot:
         if prev_data and prev_data.get("total_spend", 0) > 0:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**🔍 谁在花钱？(过去1小时变化)**"}})
         else:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**🔍 谁在花钱？(今日累计)**"}})
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**🔍 谁在花钱？(快照缺失，显示累计)**"}})
 
         # 计算每个投手的小时消耗增量
         prev_optimizer_map = {}
@@ -1312,7 +1362,7 @@ class LarkBot:
                 prev_optimizer_map[opt.get("optimizer")] = opt.get("spend", 0)
 
         optimizer_deltas = []
-        for opt in optimizer_spend[:5]:
+        for opt in optimizer_spend:
             optimizer_name = opt.get("optimizer", "未知")
             current_spend = opt.get("spend", 0)
             prev_spend = prev_optimizer_map.get(optimizer_name, 0)
@@ -1344,7 +1394,7 @@ class LarkBot:
 
         # 使用表格组件展示投手消耗
         optimizer_rows = []
-        for opt in optimizer_deltas[:5]:
+        for opt in optimizer_deltas:
             delta = opt["delta"]
             status = "🔥" if delta > 100 else "⚠️ 停滞" if delta < 50 else ""
             camp_str = ", ".join(opt['top_campaigns']) if opt['top_campaigns'] else "-"
@@ -1359,6 +1409,7 @@ class LarkBot:
         if optimizer_rows:
             elements.append({
                 "tag": "table",
+                "page_size": 20,
                 "columns": [
                     {"name": "optimizer", "display_name": "投手"},
                     {"name": "delta", "display_name": "新增消耗"},
@@ -1374,7 +1425,36 @@ class LarkBot:
         # ========== 板块 3: 实时策略建议 (Actionable Insights) ==========
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**⚡️ 操作建议**"}})
 
-        # AI 生成整体态势和具体建议
+        # ChatGPT 智能分析（GPT-5.2）
+        if self.chatgpt_advisor:
+            try:
+                chatgpt_analysis = self.chatgpt_advisor.analyze_realtime_data(data, prev_data)
+
+                # 小时趋势
+                hourly_trend = chatgpt_analysis.get("hourly_trend", "")
+                if hourly_trend:
+                    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 🤖 GPT分析：{hourly_trend}"}})
+
+                # 消耗节奏评估
+                pace = chatgpt_analysis.get("pace_assessment", "")
+                if pace:
+                    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 📈 节奏评估：{pace}"}})
+
+                # 紧急操作
+                urgent_actions = chatgpt_analysis.get("urgent_actions", [])
+                for action in urgent_actions[:2]:
+                    if action:
+                        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 🚨 {action}"}})
+
+                # 观察项
+                watch_list = chatgpt_analysis.get("watch_list", [])
+                for item in watch_list[:2]:
+                    if item:
+                        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 👀 {item}"}})
+            except Exception:
+                pass  # ChatGPT 分析失败，静默跳过
+
+        # Gemini AI 生成整体态势和具体建议
         ai_insights = self._generate_realtime_insights(data)
         if ai_insights:
             # 整体态势评估
@@ -1592,7 +1672,18 @@ def Daily_Job(webhook_url: str, secret: str = None, data: Dict[str, Any] = None,
     Returns:
         发送结果
     """
-    bot = LarkBot(webhook_url=webhook_url, secret=secret, config=config)
+    import os
+    # 从环境变量获取 API Key
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    chatgpt_api_key = os.getenv("OPENAI_API_KEY") or gemini_api_key
+
+    bot = LarkBot(
+        webhook_url=webhook_url,
+        secret=secret,
+        config=config,
+        gemini_api_key=gemini_api_key,
+        chatgpt_api_key=chatgpt_api_key
+    )
 
     # 验证数据
     is_valid, error_type, error_message = bot.validate_daily_data(data)

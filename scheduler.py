@@ -343,10 +343,10 @@ class BrainScheduler:
         schedule.every().day.at("09:00").do(self.send_daily_report)
         print(f"[Scheduler] 已设置每日 09:00 日报播报")
 
-        # 设置每日 9:00-24:00 整点实时播报 (每小时整点触发)
+        # 设置每日 9:00-24:00 整点实时播报 (每小时10分触发，等待QuickBI数据同步)
         for hour in range(9, 24):
-            schedule.every().day.at(f"{hour:02d}:30").do(self.send_realtime_report)
-        print(f"[Scheduler] 已设置每日 9:30-23:30 实时播报 (每小时整点后30分触发)")
+            schedule.every().day.at(f"{hour:02d}:10").do(self.send_realtime_report)
+        print(f"[Scheduler] 已设置每日 9:10-23:10 实时播报 (每小时10分触发)")
 
         # 持续运行
         while True:
