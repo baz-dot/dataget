@@ -1,0 +1,16 @@
+# XMP API 数据采集 - Cloud Build 配置
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/xmp-campaign-scraper'
+      - '-f'
+      - 'deploy/Dockerfile.xmp'
+      - '.'
+
+images:
+  - 'gcr.io/$PROJECT_ID/xmp-campaign-scraper'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
