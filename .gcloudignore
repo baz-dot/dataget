@@ -19,3 +19,8 @@ dataeye_cookies.json
 dataeye_responses.json
 dataeye_data_*.json
 debug_responses.json
+Market Potential Scraper/
+tests/
+scripts/
+docs/
+*.md

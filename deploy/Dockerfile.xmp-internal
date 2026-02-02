@@ -1,0 +1,27 @@
+# XMP 内部 API 数据采集 - Cloud Run Jobs 镜像
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装依赖
+RUN pip install --no-cache-dir \
+    aiohttp \
+    requests \
+    python-dotenv \
+    google-cloud-bigquery \
+    playwright
+
+# 安装 Playwright 浏览器 (用于登录获取 Token)
+RUN playwright install chromium --with-deps
+
+# 复制代码文件
+COPY xmp/ ./xmp/
+COPY config/ ./config/
+COPY bigquery_storage.py .
+COPY utils/ ./utils/
+
+ENV PYTHONUNBUFFERED=1
+ENV CLOUD_RUN=true
+
+# 运行 XMP 内部 API 抓取 (实时数据)
+CMD ["python", "-m", "xmp.xmp_scheduler", "--upload"]

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from google.cloud import bigquery
 from dotenv import load_dotenv
+from config.data_source import get_data_source_config
 
 
 class SignalType(Enum):
@@ -79,17 +80,22 @@ class RuleConfig:
 class RuleEngine:
     """规则引擎核心类"""
 
-    def __init__(self, project_id: str, dataset_id: str, config: RuleConfig = None):
+    def __init__(self, project_id: str, dataset_id: str = None, config: RuleConfig = None, table_id: str = None):
         """
         初始化规则引擎
 
         Args:
             project_id: GCP 项目 ID
-            dataset_id: BigQuery 数据集 ID
+            dataset_id: BigQuery 数据集 ID，默认从配置读取
             config: 规则配置
+            table_id: 表 ID，默认从配置读取
         """
+        # 从配置获取默认数据源
+        data_source_config = get_data_source_config()
+
         self.project_id = project_id
-        self.dataset_id = dataset_id
+        self.dataset_id = dataset_id or data_source_config["dataset_id"]
+        self.table_id = table_id or data_source_config["table_id"]
         self.config = config or RuleConfig()
         self.client = bigquery.Client(project=project_id)
         self.signals: List[Signal] = []
@@ -140,7 +146,7 @@ class RuleEngine:
 
     def _get_active_campaigns(self, date: str) -> List[Dict[str, Any]]:
         """获取活跃状态的 Campaign 数据"""
-        table_ref = f"{self.project_id}.{self.dataset_id}.quickbi_campaigns"
+        table_ref = f"{self.project_id}.{self.dataset_id}.{self.table_id}"
 
         query = f"""
         SELECT
@@ -154,7 +160,7 @@ class RuleEngine:
             SUM(new_user_revenue) as revenue,
             SUM(impressions) as impressions,
             SUM(clicks) as clicks,
-            SAFE_DIVIDE(SUM(new_user_revenue), SUM(spend)) as d0_roas,
+            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas,
             SAFE_DIVIDE(SUM(spend), SUM(new_users)) as cpi,
             SAFE_DIVIDE(SUM(clicks), SUM(impressions)) as ctr,
             SAFE_DIVIDE(SUM(new_users), SUM(clicks)) as cvr
@@ -180,7 +186,7 @@ class RuleEngine:
                     "revenue": float(row.revenue or 0),
                     "impressions": int(row.impressions or 0),
                     "clicks": int(row.clicks or 0),
-                    "d0_roas": float(row.d0_roas or 0),
+                    "media_roas": float(row.media_roas or 0),
                     "cpi": float(row.cpi or 0),
                     "ctr": float(row.ctr or 0),
                     "cvr": float(row.cvr or 0),
@@ -193,26 +199,26 @@ class RuleEngine:
     def _check_stop_loss(self, campaign: Dict[str, Any]) -> Optional[Signal]:
         """
         策略A: 止损信号检查
-        逻辑: Spend > $30 且 D0 ROAS < 10% (或 Revenue = 0)
+        逻辑: Spend > $30 且 Media ROAS < 10% (或 Revenue = 0)
         """
         spend = campaign["spend"]
-        d0_roas = campaign["d0_roas"]
+        media_roas = campaign["media_roas"]
         revenue = campaign["revenue"]
 
         # 检查止损条件
         if spend > self.config.stop_loss_min_spend:
-            if revenue == 0 or d0_roas < self.config.stop_loss_max_roas:
+            if revenue == 0 or media_roas < self.config.stop_loss_max_roas:
                 return Signal(
                     signal_type=SignalType.STOP_LOSS,
                     priority=SignalPriority.CRITICAL,
                     campaign_id=campaign["campaign_id"],
                     campaign_name=campaign["campaign_name"],
                     optimizer=campaign["optimizer"],
-                    message=f"消耗 ${spend:.2f}，D0 ROAS {d0_roas:.1%}，收入 ${revenue:.2f}",
+                    message=f"消耗 ${spend:.2f}，Media ROAS {media_roas:.1%}，收入 ${revenue:.2f}",
                     action="立即关停",
                     metrics={
                         "spend": spend,
-                        "d0_roas": d0_roas,
+                        "media_roas": media_roas,
                         "revenue": revenue,
                         "channel": campaign["channel"],
                         "country": campaign["country"]
@@ -223,13 +229,13 @@ class RuleEngine:
     def _check_scale_up(self, campaign: Dict[str, Any]) -> Optional[Signal]:
         """
         策略B: 扩量信号检查
-        逻辑: D0 ROAS > 40% 且 Spend > $50 且 CPI < 目标值
+        逻辑: Media ROAS > 40% 且 Spend > $50 且 CPI < 目标值
         """
         spend = campaign["spend"]
-        d0_roas = campaign["d0_roas"]
+        media_roas = campaign["media_roas"]
         cpi = campaign["cpi"]
 
-        if (d0_roas > self.config.scale_up_min_roas and
+        if (media_roas > self.config.scale_up_min_roas and
             spend > self.config.scale_up_min_spend and
             cpi < self.config.scale_up_target_cpi):
             return Signal(
@@ -238,11 +244,11 @@ class RuleEngine:
                 campaign_id=campaign["campaign_id"],
                 campaign_name=campaign["campaign_name"],
                 optimizer=campaign["optimizer"],
-                message=f"D0 ROAS {d0_roas:.1%}，CPI ${cpi:.2f}，消耗 ${spend:.2f}",
+                message=f"Media ROAS {media_roas:.1%}，CPI ${cpi:.2f}，消耗 ${spend:.2f}",
                 action="建议预算上调 20% 或复制计划到其他版位",
                 metrics={
                     "spend": spend,
-                    "d0_roas": d0_roas,
+                    "media_roas": media_roas,
                     "cpi": cpi,
                     "new_users": campaign["new_users"],
                     "channel": campaign["channel"],
@@ -257,10 +263,10 @@ class RuleEngine:
         逻辑: 计划ROAS达标，但 CTR 呈下降趋势 (环比昨日下降20%) 或 CTR < 1%
         """
         ctr = campaign["ctr"]
-        d0_roas = campaign["d0_roas"]
+        media_roas = campaign["media_roas"]
 
         # 只检查 ROAS 达标的计划
-        if d0_roas < self.config.scale_up_min_roas:
+        if media_roas < self.config.scale_up_min_roas:
             return None
 
         # 获取昨日 CTR 进行环比
@@ -288,7 +294,7 @@ class RuleEngine:
                     "ctr": ctr,
                     "yesterday_ctr": yesterday_ctr,
                     "ctr_drop": ctr_drop,
-                    "d0_roas": d0_roas,
+                    "media_roas": media_roas,
                     "top_materials": top_materials
                 }
             )
@@ -297,7 +303,7 @@ class RuleEngine:
     def _get_yesterday_ctr(self, campaign_id: str, date: str) -> Optional[float]:
         """获取昨日 CTR"""
         yesterday = (datetime.strptime(date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
-        table_ref = f"{self.project_id}.{self.dataset_id}.quickbi_campaigns"
+        table_ref = f"{self.project_id}.{self.dataset_id}.{self.table_id}"
 
         query = f"""
         SELECT SAFE_DIVIDE(SUM(clicks), SUM(impressions)) as ctr

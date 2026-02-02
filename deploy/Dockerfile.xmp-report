@@ -1,0 +1,28 @@
+# XMP 日报/周报生成 - Cloud Run Jobs 镜像
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装依赖
+RUN pip install --no-cache-dir \
+    aiohttp \
+    requests \
+    python-dotenv \
+    google-cloud-bigquery \
+    loguru
+
+# 复制代码文件
+COPY xmp/ ./xmp/
+COPY config/ ./config/
+COPY bigquery_storage.py .
+COPY utils/ ./utils/
+COPY lark/ ./lark/
+COPY deploy/start_report.sh ./start_report.sh
+
+RUN chmod +x ./start_report.sh
+
+ENV PYTHONUNBUFFERED=1
+ENV CLOUD_RUN=true
+
+# 根据 REPORT_MODE 环境变量运行日报或周报
+CMD ["./start_report.sh"]

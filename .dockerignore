@@ -34,3 +34,10 @@ terraform/
 
 # 忽略文档
 README.md
+
+# Windows 保留文件名 (会导致 Linux 构建失败)
+**/nul
+**/NUL
+
+# Claude 工具目录
+**/.claude

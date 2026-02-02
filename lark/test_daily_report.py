@@ -3,6 +3,7 @@
 """
 import os
 import sys
+import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -11,26 +12,41 @@ load_dotenv()
 from lark.lark_bot import LarkBot, Daily_Job
 from bigquery_storage import BigQueryUploader
 
-# 配置
-webhook_url = os.getenv('LARK_WEBHOOK_URL', 'https://open.larksuite.com/open-apis/bot/v2/hook/df0f480c-d0ac-43b0-bfc0-2531ce27c735')
-secret = os.getenv('LARK_SECRET') or None
-bi_link = os.getenv('DAILY_REPORT_BI_LINK', 'https://bi.aliyun.com/product/vigloo.htm?menuId=f438317d-6f93-4561-8fb2-e85bf2e9aea8')
+# 命令行参数
+parser = argparse.ArgumentParser(description='测试日报播报')
+parser.add_argument('--webhook', '-w', type=str, help='指定 Webhook URL')
+parser.add_argument('--secret', '-s', type=str, help='指定签名密钥')
+parser.add_argument('--date', '-d', type=str, help='指定日期 (YYYY-MM-DD)，默认昨天')
+parser.add_argument('--latest', '-l', action='store_true', help='使用最新 batch（而非整点 batch）')
+args = parser.parse_args()
+
+# 配置 - 优先使用命令行参数
+webhook_url = args.webhook or os.getenv('LARK_WEBHOOK_URL')
+secret = args.secret or os.getenv('LARK_SECRET') or None
+bi_link = os.getenv('DAILY_REPORT_BI_LINK', 'https://bi.aliyun.com/product/vigloo.htm')
 project_id = os.getenv('BQ_PROJECT_ID')
 
 print("=" * 60)
 print("测试日报播报功能 - 真实数据")
 print("=" * 60)
-print(f"Webhook URL: {webhook_url[:50]}...")
+print(f"Webhook URL: {webhook_url[:50] if webhook_url else '未配置'}...")
 print(f"Secret: {'已配置' if secret else '未配置'}")
+
+if not webhook_url:
+    print("\n[错误] 未配置 Webhook URL")
+    print("使用方法: python test_daily_report.py --webhook <URL>")
+    sys.exit(1)
 
 # 初始化 BigQuery
 bq = BigQueryUploader(project_id, "quickbi_data")
 
-# 查询昨天的数据 (T-1)，这是日报的正常逻辑
-yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-print(f"\n[1] 查询 {yesterday} 的日报数据 (T-1)...")
+# 查询日期 - 优先使用命令行参数，默认昨天
+query_date = args.date or (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+print(f"\n[1] 查询 {query_date} 的日报数据...")
+if args.latest:
+    print("    (使用最新 batch)")
 
-report_data = bq.query_daily_report_data(date=yesterday)
+report_data = bq.query_daily_report_data(date=query_date, use_latest_batch=args.latest)
 
 print(f"\n查询结果:")
 print(f"  日期: {report_data.get('date')}")

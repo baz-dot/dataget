@@ -1458,52 +1458,116 @@ class DataEyeScraper:
     def _click_next_page(self, target_page):
         """点击下一页按钮"""
         try:
+            # 保存翻页前截图（用于调试）
+            try:
+                screenshot_path = f"dataeye_before_page_{target_page}.png"
+                self.page.screenshot(path=screenshot_path)
+                print(f"  已保存翻页前截图: {screenshot_path}")
+            except:
+                pass
+
+            # 调试：打印页面上所有分页相关元素
+            print(f"  调试：查找页面上的分页元素...")
+            try:
+                pagination_info = self.page.evaluate('''() => {
+                    const results = [];
+                    // 查找所有可能的分页容器
+                    const containers = document.querySelectorAll('[class*="pagination"], [class*="pager"]');
+                    containers.forEach(container => {
+                        const rect = container.getBoundingClientRect();
+                        results.push({
+                            type: 'container',
+                            className: container.className,
+                            visible: rect.width > 0 && rect.height > 0,
+                            html: container.outerHTML.substring(0, 200)
+                        });
+                    });
+                    // 查找所有包含数字的按钮/链接
+                    const items = document.querySelectorAll('li, button, a');
+                    items.forEach(item => {
+                        const text = item.textContent.trim();
+                        if (/^\d+$/.test(text) || text === '>' || text === '下一页' || text === 'Next') {
+                            const rect = item.getBoundingClientRect();
+                            results.push({
+                                type: 'item',
+                                tag: item.tagName,
+                                text: text,
+                                className: item.className,
+                                visible: rect.width > 0 && rect.height > 0
+                            });
+                        }
+                    });
+                    return results.slice(0, 20);
+                }''')
+                for info in pagination_info:
+                    print(f"    {info}")
+            except Exception as e:
+                print(f"    调试失败: {e}")
+
             # 先尝试直接点击页码（更可靠）
             page_num_selectors = [
+                # Ant Design 分页
                 f'.ant-pagination-item-{target_page}',
                 f'li[title="{target_page}"]',
                 f'.ant-pagination-item:has-text("{target_page}")',
-                f'a.ant-pagination-item-link:has-text("{target_page}")',
+                # 海外版可能使用的选择器
+                f'[class*="pagination"] li:has-text("{target_page}")',
+                f'[class*="pager"] li:has-text("{target_page}")',
+                f'button:has-text("{target_page}")',
+                f'a:has-text("{target_page}")',
+                # 通用选择器
+                f'li.page-item:has-text("{target_page}")',
+                f'.page-link:has-text("{target_page}")',
             ]
 
             for selector in page_num_selectors:
                 try:
                     page_btn = self.page.query_selector(selector)
                     if page_btn and page_btn.is_visible():
-                        print(f"  找到页码按钮: {selector}")
+                        print(f"  ✓ 找到页码按钮: {selector}")
                         # 尝试点击内部的 <a> 标签
                         inner_link = page_btn.query_selector('a')
                         if inner_link:
                             inner_link.click()
-                            print(f"  点击页码 {target_page} 内部链接")
+                            print(f"  ✓ 点击页码 {target_page} 内部链接")
                         else:
                             page_btn.click()
-                            print(f"  点击页码 {target_page}")
+                            print(f"  ✓ 点击页码 {target_page}")
+                        time.sleep(2)
                         return True
                 except Exception as e:
-                    print(f"  尝试 {selector} 失败: {e}")
                     continue
 
             # 回退：点击下一页按钮
             next_btn_selectors = [
+                # Ant Design
                 '.ant-pagination-next:not(.ant-pagination-disabled)',
+                '.ant-pagination-next:not(.ant-pagination-disabled) button',
+                # Element UI
                 '.el-pagination .btn-next:not([disabled])',
+                # 海外版可能的选择器
+                '[class*="pagination"] [class*="next"]:not([disabled])',
+                '[class*="pagination"] button:has-text(">")',
+                '[class*="pager"] [class*="next"]:not([disabled])',
+                # 通用选择器
                 'button:has-text("下一页"):not([disabled])',
+                'button:has-text("Next"):not([disabled])',
                 'li.next:not(.disabled) a',
                 'a:has-text(">")',
                 '.pagination-next:not(.disabled)',
+                'button.next:not([disabled])',
             ]
 
             for selector in next_btn_selectors:
                 try:
                     next_btn = self.page.query_selector(selector)
                     if next_btn and next_btn.is_visible():
-                        print(f"  找到下一页按钮: {selector}")
+                        print(f"  ✓ 找到下一页按钮: {selector}")
                         next_btn.click()
-                        print(f"  点击下一页按钮")
+                        print(f"  ✓ 点击下一页按钮")
+                        time.sleep(2)
                         return True
                 except Exception as e:
-                    print(f"  尝试 {selector} 失败: {e}")
                     continue
 
             print("  未找到任何翻页按钮")
@@ -1515,14 +1579,26 @@ class DataEyeScraper:
     def _is_last_page(self):
         """检查是否到达最后一页"""
         last_page_indicators = [
+            # Ant Design
             '.ant-pagination-next.ant-pagination-disabled',
+            # Element UI
             '.el-pagination .btn-next[disabled]',
+            # 海外版可能的选择器
+            '[class*="pagination"] [class*="next"][disabled]',
+            '[class*="pagination"] [class*="next"][class*="disabled"]',
+            '[class*="pager"] [class*="next"][disabled]',
+            # 通用选择器
             'button.next[disabled]',
+            'button:has-text("下一页")[disabled]',
+            'button:has-text("Next")[disabled]',
+            'li.next.disabled',
         ]
 
         for selector in last_page_indicators:
             try:
-                if self.page.query_selector(selector):
+                elem = self.page.query_selector(selector)
+                if elem and elem.is_visible():
+                    print(f"  检测到最后一页标识: {selector}")
                     return True
             except:
                 continue

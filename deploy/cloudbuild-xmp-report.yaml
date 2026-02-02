@@ -1,0 +1,16 @@
+# XMP 日报/周报生成 - Cloud Build 配置
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/xmp-report'
+      - '-f'
+      - 'deploy/Dockerfile.xmp-report'
+      - '.'
+
+images:
+  - 'gcr.io/$PROJECT_ID/xmp-report'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

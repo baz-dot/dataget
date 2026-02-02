@@ -41,15 +41,29 @@ class GeminiAdvisor:
         )
         self.model_name = "gemini-3-pro-preview"  # Gemini 3 Pro
 
-    def _call_api(self, prompt: str) -> str:
-        """调用 API 获取响应"""
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.choices[0].message.content
+    def _call_api(self, prompt: str, max_retries: int = 3) -> str:
+        """调用 API 获取响应，支持重试"""
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ],
+                    timeout=30  # 30秒超时
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # 2秒, 4秒, 6秒
+                    print(f"[Gemini API] 请求失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
+                    print(f"[Gemini API] {wait_time}秒后重试...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"[Gemini API] 所有重试均失败: {str(e)}")
+                    raise
 
     def generate_strategy_insights(self, data: Dict[str, Any]) -> Dict[str, str]:
         """
@@ -329,7 +343,7 @@ class GeminiAdvisor:
 
         Args:
             data: 实时播报数据，包含:
-                - summary: {total_spend, d0_roas}
+                - summary: {total_spend, media_roas}
                 - stop_loss_campaigns: [{campaign_name, optimizer, spend, roas, drama_name, country}]
                 - scale_up_campaigns: [{campaign_name, optimizer, spend, roas, drama_name, country}]
                 - country_marginal_roas: [{country, spend, roas}]
@@ -380,7 +394,7 @@ class GeminiAdvisor:
         """构建实时播报 AI 建议 Prompt"""
 
         total_spend = summary.get("total_spend", 0)
-        d0_roas = summary.get("d0_roas", 0)
+        media_roas = summary.get("media_roas", 0)
 
         # 格式化止损计划
         stop_loss_text = ""
@@ -414,7 +428,7 @@ class GeminiAdvisor:
 
 ## 当前大盘数据
 - 截止当前总消耗: ${total_spend:,.0f}
-- 当前 D0 ROAS: {d0_roas:.1%}
+- 当前 Media ROAS: {media_roas:.1%}
 
 ## 止损预警计划（已筛选：Spend>$300 且 ROAS<30%）
 {stop_loss_text}
@@ -513,7 +527,7 @@ class GeminiAdvisor:
     ) -> Dict[str, str]:
         """实时播报降级策略"""
 
-        d0_roas = summary.get("d0_roas", 0)
+        media_roas = summary.get("media_roas", 0)
 
         result = {
             "overall_assessment": "",
@@ -522,9 +536,9 @@ class GeminiAdvisor:
         }
 
         # 整体态势
-        if d0_roas >= 0.40:
+        if media_roas >= 0.40:
             result["overall_assessment"] = "大盘健康，继续保持当前节奏"
-        elif d0_roas >= 0.30:
+        elif media_roas >= 0.30:
             result["overall_assessment"] = "效率略低，需关注低效计划"
         else:
             result["overall_assessment"] = "效率偏低，建议收缩消耗、优先止损"

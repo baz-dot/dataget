@@ -156,7 +156,7 @@ class ChatGPTAdvisor:
 你熟悉的业务指标：
 - ROAS (Return on Ad Spend): 广告回报率，revenue/spend
 - CPI (Cost Per Install): 单次安装成本
-- D0 ROAS: 当天的 ROAS（用户当天付费/当天广告消耗）
+- Media ROAS: 媒体口径 ROAS（media_user_revenue/spend）
 - 止损线：通常 ROAS < 30% 需要关注
 - 健康线：通常 ROAS > 40% 表现良好
 
@@ -233,12 +233,16 @@ class ChatGPTAdvisor:
         optimizer_spend = data.get("optimizer_spend", [])
 
         total_spend = summary.get("total_spend", 0)
-        d0_roas = summary.get("d0_roas", 0)
+        media_roas = summary.get("media_roas", 0)
 
-        # 计算小时环比
+        # 计算小时环比 - 优先从 data 中的 prev_hour_summary 获取
         hourly_delta = 0
         prev_spend = 0
-        if prev_data:
+        prev_hour_summary = data.get("prev_hour_summary", {})
+        if prev_hour_summary:
+            prev_spend = prev_hour_summary.get("total_spend", 0)
+            hourly_delta = total_spend - prev_spend
+        elif prev_data:
             prev_spend = prev_data.get("total_spend", 0)
             hourly_delta = total_spend - prev_spend
 
@@ -246,7 +250,7 @@ class ChatGPTAdvisor:
 
 ### 当前状态
 - 截止当前总消耗: ${total_spend:,.2f}
-- 当前 D0 ROAS: {d0_roas:.1%}
+- 当前 Media ROAS: {media_roas:.1%}
 - 过去1小时新增消耗: ${hourly_delta:,.2f}
 
 ### 投手消耗情况
@@ -346,10 +350,10 @@ class ChatGPTAdvisor:
     def _fallback_realtime_analysis(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """实时分析降级"""
         summary = data.get("summary", {})
-        d0_roas = summary.get("d0_roas", 0)
+        media_roas = summary.get("media_roas", 0)
 
         pace = "正常"
-        if d0_roas < 0.30:
+        if media_roas < 0.30:
             pace = "效率偏低，关注止损"
 
         return {
@@ -357,6 +361,259 @@ class ChatGPTAdvisor:
             "urgent_actions": [],
             "watch_list": [],
             "pace_assessment": pace
+        }
+
+    # ============ 智能预警分析 ============
+
+    def analyze_smart_alerts(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        智能预警 AI 分析 - 分析原因、给出操作建议、预测趋势
+
+        Args:
+            data: 预警数据，包含:
+                - optimizer: 投手名称
+                - stop_loss_alerts: 止损预警列表
+                - scale_up_alerts: 扩量机会列表
+
+        Returns:
+            {
+                "stop_loss_analysis": [{"campaign": "", "reason": "", "action": "", "trend": ""}],
+                "scale_up_analysis": [{"campaign": "", "reason": "", "action": "", "trend": ""}],
+                "overall_advice": "整体建议"
+            }
+        """
+        try:
+            prompt = self._build_smart_alerts_prompt(data)
+            system_prompt = """你是一位资深的广告投放优化师，擅长分析广告数据并给出精准的操作建议。
+请基于数据给出简洁、可执行的建议，每条建议不超过30字。"""
+
+            response = self._call_api_with_retry(prompt, system_prompt)
+            return self._parse_smart_alerts_response(response)
+        except Exception as e:
+            print(f"[ChatGPT] 智能预警分析失败: {e}")
+            return self._fallback_smart_alerts(data)
+
+    def _build_smart_alerts_prompt(self, data: Dict[str, Any]) -> str:
+        """构建智能预警分析 Prompt"""
+        optimizer = data.get("optimizer", "未知")
+        stop_loss = data.get("stop_loss_alerts", [])
+        scale_up = data.get("scale_up_alerts", [])
+
+        prompt = f"""## 投手 [{optimizer}] 智能预警分析
+
+### 止损预警计划 ({len(stop_loss)} 个)
+"""
+        for alert in stop_loss[:5]:
+            prompt += f"""- 计划: {alert.get('campaign_name', '')[:30]}
+  剧集: {alert.get('drama_name', '')} | 国家: {alert.get('country', '')}
+  消耗: ${alert.get('spend', 0):,.0f} | ROAS: {alert.get('roas', 0):.0%}
+  大盘平均: {alert.get('benchmark_roas', 0):.0%}
+  系统结论: {alert.get('conclusion', '建议关停')}
+"""
+
+        prompt += f"""
+### 扩量机会计划 ({len(scale_up)} 个)
+"""
+        for alert in scale_up[:5]:
+            prompt += f"""- 计划: {alert.get('campaign_name', '')[:30]}
+  剧集: {alert.get('drama_name', '')} | 国家: {alert.get('country', '')}
+  消耗: ${alert.get('spend', 0):,.0f} | ROAS: {alert.get('roas', 0):.0%}
+  大盘平均: {alert.get('benchmark_roas', 0):.0%}
+  系统结论: {alert.get('conclusion', '建议加预算')}
+"""
+
+        prompt += """
+---
+请分析每个计划，输出 JSON 格式：
+
+```json
+{
+  "stop_loss_analysis": [
+    {"campaign": "计划名", "reason": "ROAS低的可能原因", "action": "具体操作建议", "trend": "预测趋势"}
+  ],
+  "scale_up_analysis": [
+    {"campaign": "计划名", "reason": "ROAS高的原因", "action": "扩量建议", "trend": "预测趋势"}
+  ],
+  "overall_advice": "给该投手的整体建议(一句话)"
+}
+```
+
+分析要点：
+1. 止损原因：素材疲劳/受众不匹配/出价过高/竞争加剧
+2. 扩量原因：素材优质/受众精准/市场红利
+3. 止损操作：可建议"关停"或"降预算+换素材"，灵活判断
+4. 扩量操作：加预算xx%、复制扩量等
+5. 趋势预测：继续恶化/可能回升/持续向好"""
+
+        return prompt
+
+    def _parse_smart_alerts_response(self, response_text: str) -> Dict[str, Any]:
+        """解析智能预警分析响应"""
+        try:
+            json_str = self._extract_json(response_text)
+            if json_str:
+                return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+        return {
+            "stop_loss_analysis": [],
+            "scale_up_analysis": [],
+            "overall_advice": response_text[:100] if response_text else "分析结果解析失败"
+        }
+
+    def _fallback_smart_alerts(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """智能预警分析降级"""
+        return {
+            "stop_loss_analysis": [],
+            "scale_up_analysis": [],
+            "overall_advice": "AI 分析暂不可用"
+        }
+
+    # ============ 周报分析 ============
+
+    def analyze_weekly_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        周报智能分析 - 周度趋势、核心发现、风险提示、下周建议
+
+        Args:
+            data: 周报数据，包含:
+                - week_start, week_end: 周期
+                - summary: 本周大盘汇总
+                - prev_week_summary: 上周数据
+                - daily_stats: 日趋势
+                - optimizer_weekly: 投手周度数据
+                - top_dramas, potential_dramas, declining_dramas: 剧集分类
+                - top_countries, emerging_markets: 市场数据
+
+        Returns:
+            {
+                "key_findings": "核心发现",
+                "risk_alerts": "风险提示",
+                "next_week_suggestions": "下周建议"
+            }
+        """
+        try:
+            prompt = self._build_weekly_analysis_prompt(data)
+            system_prompt = """你是一位资深的广告投放策略分析师，擅长从周度数据中发现趋势和机会。
+请基于数据给出简洁、有洞察力的分析，每条建议不超过50字。"""
+
+            response = self._call_api_with_retry(prompt, system_prompt)
+            return self._parse_weekly_analysis(response)
+        except Exception as e:
+            print(f"[ChatGPT] 周报分析失败: {e}")
+            return self._fallback_weekly_analysis(data)
+
+    def _build_weekly_analysis_prompt(self, data: Dict[str, Any]) -> str:
+        """构建周报分析 Prompt"""
+        week_start = data.get("week_start", "")
+        week_end = data.get("week_end", "")
+        summary = data.get("summary", {})
+        prev_summary = data.get("prev_week_summary", {})
+        daily_stats = data.get("daily_stats", [])
+        optimizer_weekly = data.get("optimizer_weekly", [])
+        top_dramas = data.get("top_dramas", [])
+        potential_dramas = data.get("potential_dramas", [])
+        declining_dramas = data.get("declining_dramas", [])
+        top_countries = data.get("top_countries", [])
+        emerging_markets = data.get("emerging_markets", [])
+
+        # 计算环比
+        week_spend = summary.get("week_total_spend", 0)
+        prev_spend = prev_summary.get("week_total_spend", 0)
+        week_roas = summary.get("week_avg_roas", 0)
+        prev_roas = prev_summary.get("week_avg_roas", 0)
+        spend_change = (week_spend - prev_spend) / prev_spend if prev_spend > 0 else 0
+        roas_change = week_roas - prev_roas
+
+        prompt = f"""## 周报数据分析 [{week_start} ~ {week_end}]
+
+### 大盘概况
+- 周总消耗: ${week_spend:,.0f} (环比 {spend_change:+.1%})
+- 周均 ROAS: {week_roas:.1%} (环比 {roas_change:+.1%})
+- 日均消耗: ${summary.get('daily_avg_spend', 0):,.0f}
+
+### 日趋势
+"""
+        for day in daily_stats:
+            prompt += f"- {day['date']}: ${day['spend']:,.0f}, ROAS {day['roas']:.1%}\n"
+
+        prompt += "\n### 投手表现 (按消耗排序)\n"
+        for opt in optimizer_weekly[:5]:
+            change = opt.get('roas_change', 0)
+            prompt += f"- {opt['name']}: ${opt['spend']:,.0f}, ROAS {opt['roas']:.1%} ({change:+.1%})\n"
+
+        prompt += "\n### 头部剧集 (消耗>$10k, ROAS>40%)\n"
+        for d in top_dramas[:3]:
+            prompt += f"- {d['name']}: ${d['spend']:,.0f}, ROAS {d['roas']:.1%}\n"
+
+        prompt += "\n### 潜力剧集 (消耗$1k-$10k, ROAS>50%)\n"
+        for d in potential_dramas[:3]:
+            prompt += f"- {d['name']}: ${d['spend']:,.0f}, ROAS {d['roas']:.1%}\n"
+
+        prompt += "\n### 衰退预警 (ROAS环比下降>10%)\n"
+        for d in declining_dramas[:3]:
+            prompt += f"- {d['name']}: ROAS {d['roas']:.1%} ({d.get('roas_change', 0):+.1%})\n"
+
+        prompt += "\n### 主力市场\n"
+        for c in top_countries[:5]:
+            prompt += f"- {c['name']}: ${c['spend']:,.0f}, ROAS {c['roas']:.1%}\n"
+
+        prompt += "\n### 新兴机会 (非主投国家, ROAS>50%)\n"
+        for m in emerging_markets[:3]:
+            prompt += f"- {m['name']}: ROAS {m['roas']:.1%}, ${m['spend']:,.0f}\n"
+
+        prompt += """
+---
+请分析以上周度数据，输出 JSON 格式：
+
+```json
+{
+  "key_findings": "本周最重要的1-2个发现（50字内）",
+  "risk_alerts": "需要关注的风险点（50字内）",
+  "next_week_suggestions": "下周操作建议（50字内）"
+}
+```
+
+分析要点：
+1. 从消耗和ROAS趋势判断整体健康度
+2. 识别表现突出或下滑的投手/剧集/市场
+3. 发现可放量的潜力剧集和新兴市场
+4. 给出具体可执行的下周建议"""
+
+        return prompt
+
+    def _parse_weekly_analysis(self, response_text: str) -> Dict[str, Any]:
+        """解析周报分析响应"""
+        try:
+            json_str = self._extract_json(response_text)
+            if json_str:
+                return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+        return {
+            "key_findings": response_text[:100] if response_text else "分析结果解析失败",
+            "risk_alerts": "",
+            "next_week_suggestions": ""
+        }
+
+    def _fallback_weekly_analysis(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """周报分析降级"""
+        summary = data.get("summary", {})
+        roas = summary.get("week_avg_roas", 0)
+
+        if roas >= 0.40:
+            finding = "本周整体效率良好，ROAS达标"
+        elif roas >= 0.30:
+            finding = "本周效率一般，需关注优化"
+        else:
+            finding = "本周效率偏低，建议重点止损"
+
+        return {
+            "key_findings": finding,
+            "risk_alerts": "AI 分析暂不可用",
+            "next_week_suggestions": "请查看数据明细制定策略"
         }
 
 

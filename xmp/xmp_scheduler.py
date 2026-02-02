@@ -22,6 +22,42 @@ from typing import Optional, Dict, Any, List
 # 北京时区 (UTC+8)
 BEIJING_TZ = timezone(timedelta(hours=8))
 
+
+def get_last_week_workdays(end_date: datetime) -> List[str]:
+    """
+    获取上周或本周的完整工作周（周一到周五）
+
+    规则:
+    - 周一到周五运行: 统计上周的周一到周五
+    - 周六到周日运行: 统计本周的周一到周五
+
+    Args:
+        end_date: 参考日期（通常是当前日期）
+
+    Returns:
+        工作日列表，格式 ['YYYY-MM-DD', ...]，按时间升序
+    """
+    current_weekday = end_date.weekday()  # 0=Monday, 6=Sunday
+
+    # 判断是周末还是工作日
+    if current_weekday >= 5:  # 周六(5)或周日(6)
+        # 周末: 统计本周的周一到周五
+        days_to_this_monday = current_weekday
+        target_monday = end_date - timedelta(days=days_to_this_monday)
+    else:
+        # 工作日: 统计上周的周一到周五
+        days_to_last_monday = current_weekday + 7
+        target_monday = end_date - timedelta(days=days_to_last_monday)
+
+    # 生成周一到周五的日期列表
+    workdays = []
+    for i in range(5):  # 周一到周五，共5天
+        day = target_monday + timedelta(days=i)
+        workdays.append(day.strftime('%Y-%m-%d'))
+
+    return workdays
+
+
 # 添加父目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -47,15 +83,16 @@ OPTIMIZER_LIST = [
 
 # 剪辑师名单 (中文名 -> 可能的别名/英文名/姓氏)
 EDITOR_NAME_MAP = {
-    "谢奕俊": ["eason", "Xie", "Yijun", "谢"],
-    "樊凯翱": ["kyrie", "Fan", "Kaiao", "樊"],
-    "吴泽鑫": ["beita", "Wu", "Zexin", "吴"],
-    "宋涵妍": ["helen", "Song", "Hanyan", "宋"],
-    "聂佳欢": ["maggie", "Nie", "Jiahuan", "聂"],
-    "许丹晨": ["dancey", "Xu", "Danchen", "许"],
-    "李文政": ["curry", "Li", "Wenzheng", "李文政"],
-    "邓玮": ["dorris", "Deng", "Wei", "邓"],
-    "王俊喜": ["ethan", "Wang", "Junxi", "王"],
+    "谢奕俊": ["eason", "谢"],
+    "樊凯翱": ["kyrie", "樊"],
+    "吴泽鑫": ["beita", "吴"],
+    "宋涵妍": ["helen", "宋"],
+    "聂佳欢": ["maggie", "聂"],
+    "许丹晨": ["dancey", "许"],
+    "李文政": ["curry", "李"],
+    "邓玮": ["dorris", "邓"],
+    "王俊喜": ["ethan", "王"],
+    "陶佳凝": ["lynn", "陶"],
 }
 
 # 反向映射: 所有可能的名字 -> 标准中文名
@@ -94,6 +131,26 @@ def extract_editor_from_material_name(material_name: str) -> Optional[str]:
                     return cn_name
 
     return None
+
+
+def safe_float(val) -> float:
+    """安全地将值转换为 float，处理 None、空字符串、'-' 等情况"""
+    if val is None or val == '' or val == '-':
+        return 0.0
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def safe_int(val) -> int:
+    """安全地将值转换为 int"""
+    if val is None or val == '' or val == '-':
+        return 0
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return 0
 
 
 def send_lark_alert(title: str, content: str, level: str = "warning"):
@@ -516,7 +573,8 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         channel: str,
         start_date: str = None,
         end_date: str = None,
-        page_size: int = 100
+        page_size: int = 100,
+        is_xmp: str = "0"
     ) -> Optional[List[Dict[str, Any]]]:
         """
         获取指定渠道的剪辑师(designer)维度数据
@@ -526,6 +584,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
             start_date: 开始日期
             end_date: 结束日期
             page_size: 每页数量
+            is_xmp: 是否为 XMP 剪辑师 ("0" 或 "1")
 
         Returns:
             剪辑师列表，包含 designer_name, cost, revenue 等
@@ -544,7 +603,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         if not end_date:
             end_date = start_date
 
-        print(f"[XMP] 拉取 {channel} designer 维度数据: {start_date} ~ {end_date}")
+        print(f"[XMP] 拉取 {channel} designer 维度数据 (is_xmp={is_xmp}): {start_date} ~ {end_date}")
 
         all_designers = []
         page = 1
@@ -573,7 +632,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
                 "report_timezone": "",
                 "source": "report",
                 "score_by": "avg",
-                "search": [{"item": "is_xmp", "val": "0", "op": "EQ"}]
+                "search": [{"item": "is_xmp", "val": is_xmp, "op": "EQ"}]
             }
 
             try:
@@ -597,22 +656,23 @@ class XMPMultiChannelScraper(XMPBaseScraper):
                             break
 
                         for d in designers:
-                            cost = float(d.get('currency_cost') or d.get('cost') or 0)
+                            # 使用 safe_float 处理可能的 '-' 值
+                            cost = safe_float(d.get('currency_cost')) or safe_float(d.get('cost'))
                             # 计算收入
                             revenue = 0
                             for rf in revenue_fields:
-                                revenue += float(d.get(rf) or 0)
+                                revenue += safe_float(d.get(rf))
 
                             all_designers.append({
                                 'channel': channel,
                                 'designer_name': d.get('designer_name'),
                                 'cost': cost,
                                 'revenue': revenue,
-                                'impression': int(d.get('impression') or 0),
-                                'click': int(d.get('click') or 0),
-                                'cpm': float(d.get('cpm') or 0),
-                                'cpc': float(d.get('cpc') or 0),
-                                'ctr': float(d.get('ctr') or 0),
+                                'impression': safe_int(d.get('impression')),
+                                'click': safe_int(d.get('click')),
+                                'cpm': safe_float(d.get('cpm')),
+                                'cpc': safe_float(d.get('cpc')),
+                                'ctr': safe_float(d.get('ctr')),
                                 'date': start_date,
                             })
 
@@ -1366,14 +1426,25 @@ async def run_once(date_str: str = None, upload_bq: bool = False):
         print("[XMP] 无 campaign 数据")
         return result
 
-    # 聚合投手统计
-    optimizer_stats = aggregate_optimizer_stats(campaigns, date_str)
+    # 聚合投手统计 (使用 summary API)
+    optimizer_stats = await fetch_optimizer_summary_stats(scraper.bearer_token, date_str)
 
     # 获取剪辑师数据 (分渠道，不同渠道用不同方式)
     editor_stats = []
 
-    # Meta: 使用 designer 维度 API
-    meta_designers = await scraper.fetch_channel_designers('facebook', date_str, date_str)
+    # Meta: 使用 designer 维度 API (同时获取 is_xmp=0 和 is_xmp=1 的数据)
+    meta_designers = []
+
+    # 获取 is_xmp=0 的剪辑师
+    designers_0 = await scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="0")
+    if designers_0:
+        meta_designers.extend(designers_0)
+
+    # 获取 is_xmp=1 的剪辑师
+    designers_1 = await scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="1")
+    if designers_1:
+        meta_designers.extend(designers_1)
+
     if meta_designers:
         for d in meta_designers:
             cost = d['cost']
@@ -1441,6 +1512,376 @@ async def run_once(date_str: str = None, upload_bq: bool = False):
             send_lark_alert("XMP 数据上传失败", str(e), level="error")
 
     return result
+
+
+async def fetch_optimizer_summary_stats(
+    bearer_token: str,
+    date_str: str,
+    optimizer_list: List[str] = None
+) -> List[Dict]:
+    """
+    使用 channel/summary API 获取投手汇总数据
+
+    Args:
+        bearer_token: Bearer Token
+        date_str: 日期 YYYY-MM-DD
+        optimizer_list: 投手列表，默认使用 OPTIMIZER_LIST
+
+    Returns:
+        投手统计列表
+    """
+    if optimizer_list is None:
+        optimizer_list = OPTIMIZER_LIST
+
+    channels = ['tiktok', 'facebook']
+    results = []
+
+    headers = {
+        "Authorization": bearer_token,  # bearer_token 已包含 "Bearer " 前缀
+        "Content-Type": "application/json",
+        "Origin": "https://xmp.mobvista.com",
+        "Referer": "https://xmp.mobvista.com/"
+    }
+
+    for optimizer in optimizer_list:
+        optimizer_data = {
+            'stat_date': date_str,
+            'name': optimizer,
+            'tiktok_cost': 0,
+            'tiktok_revenue': 0,
+            'tiktok_roas': 0,
+            'facebook_cost': 0,
+            'facebook_revenue': 0,
+            'facebook_roas': 0,
+            'total_cost': 0,
+            'total_revenue': 0,
+            'roas': 0
+        }
+
+        for channel in channels:
+            payload = {
+                "level": "campaign",
+                "channel": channel,
+                "start_time": date_str,
+                "end_time": date_str,
+                "field": "cost,purchase_value,total_complete_payment_rate",
+                "page": 1,
+                "page_size": 1000,
+                "report_timezone": "",
+                "search": [
+                    {"item": "campaign", "val": optimizer, "op": "LIKE", "op_type": "OR"}
+                ]
+            }
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        XMP_SUMMARY_URL,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        result = await response.json()
+
+                        if result.get('code') != 0:
+                            print(f"[XMP] API 错误 ({optimizer}/{channel}): {result.get('msg')}")
+                            continue
+
+                        sum_data = result.get('data', {}).get('sum', {})
+                        cost = float(sum_data.get('cost', 0) or 0)
+                        # TikTok 用 total_complete_payment_rate，Facebook 用 purchase_value
+                        if channel == 'tiktok':
+                            revenue = float(sum_data.get('total_complete_payment_rate', 0) or 0)
+                        else:
+                            revenue = float(sum_data.get('purchase_value', 0) or 0)
+                        roas = revenue / cost if cost > 0 else 0
+
+                        if channel == 'tiktok':
+                            optimizer_data['tiktok_cost'] = cost
+                            optimizer_data['tiktok_revenue'] = revenue
+                            optimizer_data['tiktok_roas'] = roas
+                        else:
+                            optimizer_data['facebook_cost'] = cost
+                            optimizer_data['facebook_revenue'] = revenue
+                            optimizer_data['facebook_roas'] = roas
+
+            except Exception as e:
+                print(f"[XMP] 请求失败 ({optimizer}/{channel}): {e}")
+
+        # 分渠道添加记录 (export_stats_to_lark_doc 需要按 channel 区分)
+        # TikTok 记录
+        if optimizer_data['tiktok_cost'] > 0 or optimizer_data['tiktok_revenue'] > 0:
+            results.append({
+                'stat_date': date_str,
+                'name': optimizer,
+                'channel': 'tiktok',
+                'total_cost': optimizer_data['tiktok_cost'],
+                'total_revenue': optimizer_data['tiktok_revenue'],
+                'roas': optimizer_data['tiktok_roas'],
+            })
+
+        # Facebook 记录
+        if optimizer_data['facebook_cost'] > 0 or optimizer_data['facebook_revenue'] > 0:
+            results.append({
+                'stat_date': date_str,
+                'name': optimizer,
+                'channel': 'facebook',
+                'total_cost': optimizer_data['facebook_cost'],
+                'total_revenue': optimizer_data['facebook_revenue'],
+                'roas': optimizer_data['facebook_roas'],
+            })
+
+        print(f"[XMP] {optimizer}: TT ${optimizer_data['tiktok_cost']:,.2f}, Meta ${optimizer_data['facebook_cost']:,.2f}")
+
+    return results
+
+
+async def fetch_editor_tiktok_stats(
+    bearer_token: str,
+    date_str: str
+) -> List[Dict]:
+    """
+    使用 channel/summary API 获取剪辑师 TikTok 数据
+
+    Args:
+        bearer_token: Bearer Token
+        date_str: 日期 YYYY-MM-DD
+
+    Returns:
+        剪辑师 TikTok 统计列表
+    """
+    results = []
+
+    headers = {
+        "Authorization": bearer_token,  # bearer_token 已包含 "Bearer " 前缀
+        "Content-Type": "application/json",
+        "Origin": "https://xmp.mobvista.com",
+        "Referer": "https://xmp.mobvista.com/"
+    }
+
+    for cn_name, aliases in EDITOR_NAME_MAP.items():
+        # 搜索所有可能的名字（英文名 + 中文名 + 姓氏）
+        search_names = [cn_name] + aliases  # 中文全名 + 所有别名
+
+        total_cost = 0
+        total_revenue = 0
+
+        for search_name in search_names:
+            payload = {
+                "level": "ad",
+                "channel": "tiktok",
+                "start_time": date_str,
+                "end_time": date_str,
+                "field": "cost,total_complete_payment_rate",
+                "page": 1,
+                "page_size": 1000,
+                "report_timezone": "",
+                "search": [
+                    {"item": "ad", "val": search_name, "op": "LIKE", "op_type": "OR"}
+                ]
+            }
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        XMP_SUMMARY_URL,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        result = await response.json()
+
+                        if result.get('code') != 0:
+                            continue
+
+                        sum_data = result.get('data', {}).get('sum', {})
+                        cost = float(sum_data.get('cost', 0) or 0)
+                        revenue = float(sum_data.get('total_complete_payment_rate', 0) or 0)
+
+                        total_cost += cost
+                        total_revenue += revenue
+
+            except Exception as e:
+                print(f"[XMP] 请求失败 ({cn_name}/{search_name}): {e}")
+
+        # 汇总该剪辑师所有名字的数据
+        roas = total_revenue / total_cost if total_cost > 0 else 0
+        results.append({
+            'editor_name': cn_name,
+            'channel': 'tiktok',
+            'stat_date': date_str,
+            'spend': total_cost,
+            'revenue': total_revenue,
+            'roas': roas
+        })
+        print(f"[XMP] {cn_name} (TT): ${total_cost:,.2f}, Rev ${total_revenue:,.2f}")
+
+    return results
+
+
+async def fetch_editor_facebook_stats(
+    bearer_token: str,
+    date_str: str
+) -> List[Dict]:
+    """
+    使用 channel/list API 获取剪辑师 Facebook 数据
+
+    Args:
+        bearer_token: Bearer Token
+        date_str: 日期 YYYY-MM-DD
+
+    Returns:
+        剪辑师 Facebook 统计列表
+    """
+    results = []
+
+    headers = {
+        "Authorization": bearer_token,  # bearer_token 已包含 "Bearer " 前缀
+        "Content-Type": "application/json",
+        "Origin": "https://xmp.mobvista.com",
+        "Referer": "https://xmp.mobvista.com/"
+    }
+
+    # 使用 designer level 获取所有剪辑师数据
+    payload = {
+        "level": "designer",
+        "channel": "facebook",
+        "start_time": date_str,
+        "end_time": date_str,
+        "field": "cost,purchase_value,designer_name",
+        "page": 1,
+        "page_size": 1000,
+        "report_timezone": "",
+        "search": [
+            {"item": "is_xmp", "val": "0", "op": "EQ"}
+        ],
+        "source": "report"
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                XMP_LIST_URL,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                result = await response.json()
+
+                if result.get('code') != 0:
+                    print(f"[XMP] API 错误: {result.get('msg')}")
+                    return results
+
+                data_list = result.get('data', {}).get('list', [])
+
+                # 构建剪辑师中文名到英文名的反向映射
+                name_to_cn = {}
+                for cn_name, aliases in EDITOR_NAME_MAP.items():
+                    name_to_cn[cn_name] = cn_name
+                    for alias in aliases:
+                        name_to_cn[alias.lower()] = cn_name
+
+                # 安全转换为 float
+                def safe_float(val):
+                    if val is None or val == '' or val == '-':
+                        return 0.0
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        return 0.0
+
+                # 按剪辑师聚合数据
+                editor_data = {}
+                for item in data_list:
+                    designer_name = item.get('designer_name', '')
+                    # 使用 currency_cost 而不是 cost（cost 返回 '-'）
+                    cost = safe_float(item.get('currency_cost', 0))
+                    revenue = safe_float(item.get('purchase_value', 0))
+
+                    # 查找对应的中文名
+                    cn_name = name_to_cn.get(designer_name.lower())
+                    if not cn_name:
+                        cn_name = name_to_cn.get(designer_name)
+
+                    if cn_name:
+                        if cn_name not in editor_data:
+                            editor_data[cn_name] = {'cost': 0, 'revenue': 0}
+                        editor_data[cn_name]['cost'] += cost
+                        editor_data[cn_name]['revenue'] += revenue
+
+                # 转换为结果列表
+                for cn_name in EDITOR_NAME_MAP.keys():
+                    data = editor_data.get(cn_name, {'cost': 0, 'revenue': 0})
+                    cost = data['cost']
+                    revenue = data['revenue']
+                    roas = revenue / cost if cost > 0 else 0
+
+                    results.append({
+                        'editor_name': cn_name,
+                        'channel': 'facebook',
+                        'stat_date': date_str,
+                        'spend': cost,
+                        'revenue': revenue,
+                        'roas': roas
+                    })
+                    print(f"[XMP] {cn_name} (Meta): ${cost:,.2f}, Rev ${revenue:,.2f}")
+
+    except Exception as e:
+        print(f"[XMP] 请求失败 (Facebook designer): {e}")
+
+    return results
+
+
+async def fetch_editor_combined_stats(
+    bearer_token: str,
+    date_str: str
+) -> List[Dict]:
+    """
+    获取剪辑师完整数据（TikTok + Facebook 合并）
+
+    Args:
+        bearer_token: Bearer Token
+        date_str: 日期 YYYY-MM-DD
+
+    Returns:
+        剪辑师完整统计列表
+    """
+    # 并行获取 TikTok 和 Facebook 数据
+    tt_data = await fetch_editor_tiktok_stats(bearer_token, date_str)
+    fb_data = await fetch_editor_facebook_stats(bearer_token, date_str)
+
+    # 合并数据
+    results = []
+    tt_map = {d['editor_name']: d for d in tt_data}
+    fb_map = {d['editor_name']: d for d in fb_data}
+
+    for cn_name in EDITOR_NAME_MAP.keys():
+        tt = tt_map.get(cn_name, {'spend': 0, 'revenue': 0})
+        fb = fb_map.get(cn_name, {'spend': 0, 'revenue': 0})
+
+        tt_spend = tt.get('spend', 0)
+        tt_revenue = tt.get('revenue', 0)
+        fb_spend = fb.get('spend', 0)
+        fb_revenue = fb.get('revenue', 0)
+
+        total_spend = tt_spend + fb_spend
+        total_revenue = tt_revenue + fb_revenue
+
+        results.append({
+            'editor_name': cn_name,
+            'stat_date': date_str,
+            'tt_spend': tt_spend,
+            'tt_revenue': tt_revenue,
+            'tt_roas': tt_revenue / tt_spend if tt_spend > 0 else 0,
+            'meta_spend': fb_spend,
+            'meta_revenue': fb_revenue,
+            'meta_roas': fb_revenue / fb_spend if fb_spend > 0 else 0,
+            'total_spend': total_spend,
+            'total_revenue': total_revenue,
+            'total_roas': total_revenue / total_spend if total_spend > 0 else 0
+        })
+
+    return results
 
 
 def aggregate_optimizer_stats(campaigns: List[Dict], date_str: str) -> List[Dict]:
@@ -1867,12 +2308,52 @@ async def run_with_stats(date_str: str = None, upload_bq: bool = False):
         print("[XMP] 无 campaign 数据")
         return result
 
-    # 2. 聚合投手统计
-    optimizer_stats = aggregate_optimizer_stats(campaigns, date_str)
+    # 2. 聚合投手统计 (使用 summary API)
+    optimizer_stats = await fetch_optimizer_summary_stats(scraper.bearer_token, date_str)
     print(f"[XMP] 投手统计: {len(optimizer_stats)} 人")
 
-    # 3. 从 campaign 数据聚合剪辑师统计 (区分渠道)
-    editor_stats = aggregate_editor_stats_from_campaigns(campaigns, date_str)
+    # 3. 获取剪辑师数据 (分渠道，不同渠道用不同方式)
+    editor_stats = []
+
+    # Meta: 使用 designer 维度 API (同时获取 is_xmp=0 和 is_xmp=1 的数据)
+    meta_designers = []
+    designers_0 = await scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="0")
+    if designers_0:
+        meta_designers.extend(designers_0)
+    designers_1 = await scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="1")
+    if designers_1:
+        meta_designers.extend(designers_1)
+
+    if meta_designers:
+        for d in meta_designers:
+            cost = d['cost']
+            revenue = d['revenue']
+            editor_stats.append({
+                'stat_date': date_str,
+                'channel': 'facebook',
+                'name': d['designer_name'],
+                'total_cost': cost,
+                'total_revenue': revenue,
+                'd0_roas': revenue / cost if cost > 0 else 0,
+                'impressions': d['impression'],
+                'clicks': d['click'],
+                'material_count': 0,
+                'hot_count': 0,
+                'hot_rate': 0,
+                'top_material': '',
+                'top_material_cost': 0,
+                'top_material_roas': 0,
+            })
+
+    # TikTok: 使用 ad 维度 API，从 ad_name 解析剪辑师
+    tk_ads = await scraper.fetch_channel_ads('tiktok', date_str, date_str)
+    if tk_ads:
+        tk_editor_stats = aggregate_editor_stats_from_ads(tk_ads, date_str)
+        editor_stats.extend(tk_editor_stats)
+
+    # 按消耗排序
+    editor_stats.sort(key=lambda x: x['total_cost'], reverse=True)
+    print(f"[XMP] 剪辑师统计: {len(editor_stats)} 人")
 
     result['optimizer_stats'] = optimizer_stats
     result['editor_stats'] = editor_stats
@@ -1907,6 +2388,362 @@ async def run_with_stats(date_str: str = None, upload_bq: bool = False):
             send_lark_alert("XMP 统计数据上传失败", str(e), level="error")
 
     return result
+
+
+def query_stats_from_bq(date_str: str) -> Dict[str, List[Dict]]:
+    """
+    从 BigQuery 查询投手/剪辑师统计数据
+
+    Args:
+        date_str: 日期 YYYY-MM-DD
+
+    Returns:
+        {'optimizer_stats': [...], 'editor_stats': [...], 'batch_id': str, 'batch_valid': bool}
+    """
+    from google.cloud import bigquery
+    from datetime import datetime, timedelta
+
+    project_id = os.getenv('BQ_PROJECT_ID')
+    if not project_id:
+        print("[BQ] 未配置 BQ_PROJECT_ID")
+        return {'optimizer_stats': [], 'editor_stats': [], 'batch_id': None, 'batch_valid': False}
+
+    client = bigquery.Client(project=project_id)
+
+    # 直接使用最新的 batch_id（包含最完整的数据）
+    batch_id = None
+    latest_batch_query = f"""
+    SELECT MAX(batch_id) as latest_batch_id
+    FROM `{project_id}.xmp_data.xmp_optimizer_stats`
+    WHERE stat_date = '{date_str}'
+    """
+    try:
+        for row in client.query(latest_batch_query):
+            batch_id = row.latest_batch_id
+        if batch_id:
+            print(f"[BQ] ✓ 找到最新数据 batch: {batch_id}")
+    except Exception as e:
+        print(f"[BQ] 查询 batch_id 失败: {e}")
+        return {'optimizer_stats': [], 'editor_stats': [], 'batch_id': None, 'batch_valid': False}
+
+    if not batch_id:
+        print(f"[BQ] 未找到 {date_str} 的数据")
+        return {'optimizer_stats': [], 'editor_stats': [], 'batch_id': None, 'batch_valid': False}
+
+    # 2. 校验 batch_id 时效性
+    # 对于 T-1 日报，batch_id 应该是 T 日（今天）抓取的
+    # 如果 batch_id 的日期 <= stat_date，说明凌晨2点的任务没有执行成功
+    batch_valid = True
+    try:
+        batch_date_str = batch_id[:8]  # 提取 YYYYMMDD
+        batch_date = datetime.strptime(batch_date_str, '%Y%m%d').date()
+        stat_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        today = datetime.now().date()
+
+        # 如果是查询历史日期（T-1 或更早），batch 应该是 stat_date 之后抓取的
+        if stat_date < today:
+            if batch_date <= stat_date:
+                print(f"[BQ] ⚠️ 数据时效性校验失败!")
+                print(f"[BQ]   stat_date={date_str}, batch抓取日期={batch_date_str}")
+                print(f"[BQ]   batch 应该是 {date_str} 之后抓取的，但实际是当天或更早抓取")
+                print(f"[BQ]   可能原因: 凌晨2点的 T-1 数据采集任务未执行")
+                batch_valid = False
+            else:
+                print(f"[BQ] ✓ 数据时效性校验通过: batch 在 {batch_date_str} 抓取")
+    except Exception as e:
+        print(f"[BQ] 校验 batch 时效性时出错: {e}")
+
+    # 3. 查询投手统计（使用最新 batch_id）
+    opt_query = f"""
+    SELECT
+        optimizer_name as name,
+        channel,
+        spend as total_cost,
+        revenue as total_revenue,
+        roas
+    FROM `{project_id}.xmp_data.xmp_optimizer_stats`
+    WHERE stat_date = '{date_str}' AND batch_id = '{batch_id}'
+    ORDER BY spend DESC
+    """
+
+    optimizer_stats = []
+    try:
+        for row in client.query(opt_query):
+            optimizer_stats.append({
+                'name': row.name,
+                'channel': row.channel,
+                'total_cost': float(row.total_cost or 0),
+                'total_revenue': float(row.total_revenue or 0),
+                'roas': float(row.roas or 0),
+            })
+        print(f"[BQ] 查询到 {len(optimizer_stats)} 条投手数据")
+    except Exception as e:
+        print(f"[BQ] 查询投手数据失败: {e}")
+
+    # 4. 查询剪辑师统计（使用最新 batch_id）
+    editor_query = f"""
+    SELECT
+        editor_name as name,
+        channel,
+        spend as total_cost,
+        revenue as total_revenue,
+        roas
+    FROM `{project_id}.xmp_data.xmp_editor_stats`
+    WHERE stat_date = '{date_str}' AND batch_id = '{batch_id}'
+    ORDER BY spend DESC
+    """
+
+    editor_stats = []
+    try:
+        for row in client.query(editor_query):
+            editor_stats.append({
+                'name': row.name,
+                'channel': row.channel,
+                'total_cost': float(row.total_cost or 0),
+                'total_revenue': float(row.total_revenue or 0),
+                'roas': float(row.roas or 0),
+            })
+        print(f"[BQ] 查询到 {len(editor_stats)} 条剪辑师数据")
+    except Exception as e:
+        print(f"[BQ] 查询剪辑师数据失败: {e}")
+
+    return {
+        'optimizer_stats': optimizer_stats,
+        'editor_stats': editor_stats,
+        'batch_id': batch_id,
+        'batch_valid': batch_valid
+    }
+
+
+def query_weekly_stats_from_bq(start_date: str, end_date: str) -> Dict[str, Any]:
+    """
+    从 BigQuery 查询周报数据（汇总一周的投手/剪辑师统计）
+
+    Args:
+        start_date: 开始日期 YYYY-MM-DD
+        end_date: 结束日期 YYYY-MM-DD
+
+    Returns:
+        {
+            'optimizer_stats': [...],
+            'editor_stats': [...],
+            'invalid_dates': [],  # batch 校验失败的日期
+            'all_valid': bool
+        }
+    """
+    from datetime import datetime, timedelta
+
+    all_opt_stats = []
+    all_editor_stats = []
+    invalid_dates = []
+
+    # 逐天查询数据
+    current = datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.strptime(end_date, '%Y-%m-%d')
+
+    while current <= end:
+        date_str = current.strftime('%Y-%m-%d')
+        print(f"\n--- 查询 {date_str} ---")
+
+        bq_data = query_stats_from_bq(date_str)
+
+        if not bq_data.get('batch_valid', True):
+            invalid_dates.append(date_str)
+            print(f"[周报] ⚠️ {date_str} 数据校验失败，跳过")
+        else:
+            all_opt_stats.extend(bq_data.get('optimizer_stats', []))
+            all_editor_stats.extend(bq_data.get('editor_stats', []))
+
+        current += timedelta(days=1)
+
+    return {
+        'optimizer_stats': all_opt_stats,
+        'editor_stats': all_editor_stats,
+        'invalid_dates': invalid_dates,
+        'all_valid': len(invalid_dates) == 0
+    }
+
+
+def export_stats_to_lark_doc(
+    optimizer_stats: List[Dict],
+    editor_stats: List[Dict],
+    date_str: str,
+    doc_token: str = None
+) -> bool:
+    """
+    导出投手/剪辑师统计到飞书文档
+
+    Args:
+        optimizer_stats: 投手统计数据
+        editor_stats: 剪辑师统计数据
+        date_str: 日期
+        doc_token: 飞书文档 token，不传则从环境变量 XMP_DOC_TOKEN 获取
+
+    Returns:
+        是否成功
+    """
+    try:
+        from lark.lark_doc_client import create_doc_client
+    except ImportError:
+        print("[飞书] 无法导入 lark_doc_client 模块")
+        return False
+
+    doc_token = doc_token or os.getenv('XMP_DOC_TOKEN')
+    if not doc_token:
+        print("[飞书] 未配置 XMP_DOC_TOKEN，跳过文档写入")
+        return False
+
+    # 合并 Meta + TikTok 数据
+    def merge_by_name(stats: List[Dict]) -> List[Dict]:
+        merged = {}
+        for s in stats:
+            name = s.get('name')
+            if name not in merged:
+                merged[name] = {
+                    'name': name,
+                    'meta_spend': 0, 'meta_revenue': 0,
+                    'tt_spend': 0, 'tt_revenue': 0,
+                    # 剪辑师特有字段
+                    'material_count': 0,
+                    'hot_count': 0,
+                    'top_materials': [],  # 存储所有素材，用于找 Top
+                }
+            channel = s.get('channel', '')
+            spend = s.get('total_cost', 0)
+            revenue = s.get('total_revenue', 0)
+
+            if channel == 'facebook':
+                merged[name]['meta_spend'] += spend
+                merged[name]['meta_revenue'] += revenue
+            elif channel == 'tiktok':
+                merged[name]['tt_spend'] += spend
+                merged[name]['tt_revenue'] += revenue
+
+            # 合并剪辑师特有字段
+            material_count = s.get('material_count', 0)
+            hot_count = s.get('hot_count', 0)
+            top_material = s.get('top_material', '')
+            top_material_cost = s.get('top_material_cost', 0)
+            top_material_roas = s.get('top_material_roas', 0)
+
+            merged[name]['material_count'] += material_count
+            merged[name]['hot_count'] += hot_count
+
+            # 记录 Top 素材（用于后续选择消耗最高的）
+            if top_material:
+                merged[name]['top_materials'].append({
+                    'name': top_material,
+                    'cost': top_material_cost,
+                    'roas': top_material_roas,
+                    'channel': channel
+                })
+
+        result = []
+        for name, d in merged.items():
+            total_spend = d['meta_spend'] + d['tt_spend']
+            total_revenue = d['meta_revenue'] + d['tt_revenue']
+            material_count = d['material_count']
+            hot_count = d['hot_count']
+
+            # 选择消耗最高的 Top 素材
+            top_materials = d['top_materials']
+            if top_materials:
+                top_mat = max(top_materials, key=lambda x: x['cost'])
+                top_material = top_mat['name']
+                top_material_cost = top_mat['cost']
+                top_material_roas = top_mat['roas']
+            else:
+                top_material = ''
+                top_material_cost = 0
+                top_material_roas = 0
+
+            result.append({
+                'name': name,
+                'meta_spend': d['meta_spend'],
+                'meta_revenue': d['meta_revenue'],
+                'meta_roas': d['meta_revenue'] / d['meta_spend'] if d['meta_spend'] > 0 else 0,
+                'tt_spend': d['tt_spend'],
+                'tt_revenue': d['tt_revenue'],
+                'tt_roas': d['tt_revenue'] / d['tt_spend'] if d['tt_spend'] > 0 else 0,
+                'total_spend': total_spend,
+                'total_revenue': total_revenue,
+                'total_roas': total_revenue / total_spend if total_spend > 0 else 0,
+                # 剪辑师特有字段
+                'material_count': material_count,
+                'hot_count': hot_count,
+                'hot_rate': hot_count / material_count if material_count > 0 else 0,
+                'top_material': top_material,
+                'top_material_cost': top_material_cost,
+                'top_material_roas': top_material_roas,
+            })
+        result.sort(key=lambda x: x['total_spend'], reverse=True)
+        return result
+
+    # 标注 Spend/ROAS 第一
+    def add_labels(data: List[Dict]) -> List[Dict]:
+        if not data:
+            return data
+        spend_first = max(data, key=lambda x: x['total_spend'])
+        qualified = [d for d in data if d['total_spend'] >= 100]
+        roas_first = max(qualified, key=lambda x: x['total_roas']) if qualified else None
+        for d in data:
+            labels = []
+            if d == spend_first:
+                labels.append('Spend Top1')
+            if d == roas_first:
+                labels.append('ROAS Top1')
+            d['label'] = ' | '.join(labels) if labels else ''
+        return data
+
+    opt_merged = merge_by_name(optimizer_stats)
+    editor_merged = merge_by_name(editor_stats)
+
+    # 先过滤掉韩国投手，再计算标签
+    KR_OPTIMIZERS = ['juria', 'lyla', 'jade']
+    opt_merged = [o for o in opt_merged if o.get('name', '').lower() not in KR_OPTIMIZERS]
+    opt_merged = add_labels(opt_merged)
+
+    # 先过滤掉韩国剪辑师，再计算标签
+    KR_EDITORS = ['sydney', 'dia', 'gyeommy']
+    editor_merged = [e for e in editor_merged if e.get('name', '').lower() not in KR_EDITORS]
+    editor_merged = add_labels(editor_merged)
+
+    try:
+        client = create_doc_client()
+
+        # 判断是否是 Wiki token (需要先获取实际的 doc_token)
+        # Wiki token 通常以 wiki/ 开头或者直接是 wiki_token
+        wiki_token = doc_token
+
+        # 尝试获取 Wiki 节点信息
+        node_info = client.get_wiki_node_info(wiki_token)
+        if node_info.get("code") == 0:
+            # 是 Wiki 页面，获取实际的 doc_token
+            node = node_info.get("data", {}).get("node", {})
+            actual_doc_token = node.get("obj_token")
+            obj_type = node.get("obj_type")
+            print(f"[飞书] Wiki 节点: obj_token={actual_doc_token}, obj_type={obj_type}")
+
+            if obj_type != "docx":
+                print(f"[飞书] Wiki 节点类型不是文档: {obj_type}")
+                return False
+            doc_token = actual_doc_token
+
+        result = client.write_xmp_daily_report(
+            doc_token=doc_token,
+            date_str=date_str,
+            optimizer_data=opt_merged,
+            editor_data=editor_merged
+        )
+        if result.get('code') == 0:
+            print(f"[飞书] 日报已写入文档: {doc_token}")
+            return True
+        else:
+            print(f"[飞书] 写入失败: {result.get('msg')}")
+            return False
+    except Exception as e:
+        print(f"[飞书] 写入异常: {e}")
+        return False
 
 
 def export_stats_to_excel(
@@ -2194,9 +3031,21 @@ async def main():
     parser.add_argument('--upload', action='store_true', help='上传到 BigQuery')
     parser.add_argument('--stats', action='store_true', help='生成投手/剪辑师统计')
     parser.add_argument('--excel', action='store_true', help='导出 Excel 文件')
+    parser.add_argument('--lark-doc', action='store_true', help='导出到飞书文档')
+    parser.add_argument('--from-bq', action='store_true', help='从 BigQuery 读取数据（不重新抓取）')
+    parser.add_argument('--doc-token', help='飞书文档 token，默认从 XMP_DOC_TOKEN 环境变量获取')
     parser.add_argument('--weekly', action='store_true', help='生成周报汇总')
     parser.add_argument('--days', type=int, default=7, help='周报天数，默认7天')
+    parser.add_argument('--relogin', action='store_true', help='强制重新登录获取 Token')
     args = parser.parse_args()
+
+    # 如果指定了 --relogin，删除 token 文件强制重新登录
+    if args.relogin:
+        if os.path.exists(XMP_TOKEN_FILE):
+            os.remove(XMP_TOKEN_FILE)
+            print(f"[XMP] 已删除旧 Token 文件，将重新登录")
+        else:
+            print(f"[XMP] Token 文件不存在，将进行登录")
 
     # 确定采集日期
     # 优先级: --date > --yesterday > FETCH_YESTERDAY 环境变量 > 今天
@@ -2211,24 +3060,48 @@ async def main():
     # 周报模式
     if args.weekly:
         end_date = datetime.strptime(date_str, '%Y-%m-%d')
-        start_date = end_date - timedelta(days=args.days - 1)
+
+        # 使用 --days 参数计算日期范围（支持7天完整周报）
+        days_count = args.days
+        start_date = end_date - timedelta(days=days_count - 1)
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
 
-        print(f"[周报] 抓取 {args.days} 天数据: {start_str} ~ {end_str}")
+        # 生成日期列表（包括周末）
+        date_list = []
+        current = start_date
+        while current <= end_date:
+            date_list.append(current.strftime('%Y-%m-%d'))
+            current += timedelta(days=1)
 
-        # 逐天抓取数据
-        all_opt_stats = []
-        all_editor_stats = []
+        print(f"[周报] 统计周期: {start_str} ~ {end_str} ({days_count}天)")
+        print(f"[周报] 日期列表: {', '.join(date_list)}")
 
-        for i in range(args.days):
-            day = start_date + timedelta(days=i)
-            day_str = day.strftime('%Y-%m-%d')
-            print(f"\n--- 抓取 {day_str} ---")
+        # 从 BigQuery 读取数据（--from-bq 模式）
+        if getattr(args, 'from_bq', False):
+            print(f"[周报] 从 BigQuery 读取数据...")
+            bq_data = query_weekly_stats_from_bq(start_str, end_str)
+            all_opt_stats = bq_data.get('optimizer_stats', [])
+            all_editor_stats = bq_data.get('editor_stats', [])
+            invalid_dates = bq_data.get('invalid_dates', [])
 
-            result = await run_with_stats(day_str, upload_bq=args.upload)
-            all_opt_stats.extend(result.get('optimizer_stats', []))
-            all_editor_stats.extend(result.get('editor_stats', []))
+            if invalid_dates:
+                print(f"\n[周报] ⚠️ 以下日期数据校验失败: {invalid_dates}")
+
+            if not all_opt_stats and not all_editor_stats:
+                print(f"[周报] 未找到有效数据")
+                return
+        else:
+            # 逐天抓取数据（包括周末）
+            all_opt_stats = []
+            all_editor_stats = []
+
+            for day_str in date_list:
+                print(f"\n--- 抓取 {day_str} ---")
+
+                result = await run_with_stats(day_str, upload_bq=args.upload)
+                all_opt_stats.extend(result.get('optimizer_stats', []))
+                all_editor_stats.extend(result.get('editor_stats', []))
 
         # 生成周报汇总
         weekly = generate_weekly_summary(
@@ -2240,19 +3113,64 @@ async def main():
         if args.excel:
             export_stats_to_excel(all_opt_stats, all_editor_stats, f"{start_str}_to_{end_str}")
 
+        # 导出到飞书文档
+        if getattr(args, 'lark_doc', False):
+            doc_token = getattr(args, 'doc_token', None)
+            export_stats_to_lark_doc(all_opt_stats, all_editor_stats, f"{start_str}_to_{end_str}", doc_token)
+
         # 保存周报
         output_file = f"xmp_weekly_{start_str}_to_{end_str}.json"
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(weekly, f, ensure_ascii=False, indent=2, default=str)
         print(f"周报已保存到: {output_file}")
 
-    elif args.stats or args.excel:
+    # 从 BigQuery 读取数据生成日报（不抓取）
+    elif getattr(args, 'from_bq', False):
+        print(f"[BQ] 从 BigQuery 读取 {date_str} 的数据...")
+        bq_data = query_stats_from_bq(date_str)
+        opt_stats = bq_data.get('optimizer_stats', [])
+        editor_stats = bq_data.get('editor_stats', [])
+        batch_id = bq_data.get('batch_id')
+        batch_valid = bq_data.get('batch_valid', True)
+
+        if not opt_stats and not editor_stats:
+            print(f"[BQ] 未找到 {date_str} 的数据")
+            return
+
+        # 校验 batch 时效性
+        if not batch_valid:
+            print(f"[BQ] ⚠️ 数据时效性校验失败，跳过日报生成")
+            print(f"[BQ]   batch_id={batch_id} 不是 {date_str} 之后抓取的")
+            print(f"[BQ]   请检查凌晨2点的 T-1 数据采集任务是否正常执行")
+            return
+
+        # 导出到飞书文档
+        if getattr(args, 'lark_doc', False):
+            doc_token = getattr(args, 'doc_token', None)
+            export_stats_to_lark_doc(opt_stats, editor_stats, date_str, doc_token)
+
+        # 导出 Excel
+        if args.excel:
+            export_stats_to_excel(opt_stats, editor_stats, date_str)
+
+        print(f"[完成] 日报生成完毕: {date_str}")
+
+    elif args.stats or args.excel or getattr(args, 'lark_doc', False):
         result = await run_with_stats(date_str, upload_bq=args.upload)
         if args.excel and result.get('optimizer_stats'):
             export_stats_to_excel(
                 result.get('optimizer_stats', []),
                 result.get('editor_stats', []),
                 date_str
+            )
+        # 导出到飞书文档
+        if getattr(args, 'lark_doc', False) and result.get('optimizer_stats'):
+            doc_token = getattr(args, 'doc_token', None)
+            export_stats_to_lark_doc(
+                result.get('optimizer_stats', []),
+                result.get('editor_stats', []),
+                date_str,
+                doc_token
             )
         output_file = f"xmp_data_{date_str.replace('-', '')}.json"
         with open(output_file, 'w', encoding='utf-8') as f:

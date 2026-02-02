@@ -192,8 +192,12 @@ def upload_to_gcs(data: list, bucket_name: str, batch_id: str = None):
         print(f"✗ GCS 上传失败: {e}")
 
 
-def upload_to_bigquery(data: list, project_id: str, dataset_id: str, batch_id: str = None, overview_data: dict = None):
-    """上传数据到 BigQuery"""
+def upload_to_bigquery(data: list, project_id: str, dataset_id: str, batch_id: str = None, overview_data: dict = None, stat_date: str = None):
+    """上传数据到 BigQuery
+
+    Args:
+        stat_date: 数据日期 (格式: YYYYMMDD 或 YYYY-MM-DD)
+    """
     try:
         from bigquery_storage import BigQueryUploader
 
@@ -203,8 +207,15 @@ def upload_to_bigquery(data: list, project_id: str, dataset_id: str, batch_id: s
 
         # 上传 Overview 数据
         if overview_data and overview_data.get('total_revenue', 0) > 0:
-            uploader.upload_overview_data(overview_data, batch_id=batch_id)
-            print(f"✓ 已上传 Overview 数据到 BigQuery")
+            # 转换日期格式: YYYYMMDD -> YYYY-MM-DD
+            formatted_date = None
+            if stat_date:
+                if len(stat_date) == 8:  # YYYYMMDD
+                    formatted_date = f"{stat_date[:4]}-{stat_date[4:6]}-{stat_date[6:8]}"
+                else:
+                    formatted_date = stat_date
+            uploader.upload_overview_data(overview_data, batch_id=batch_id, stat_date=formatted_date)
+            print(f"✓ 已上传 Overview 数据到 BigQuery (stat_date={formatted_date})")
 
         if batch_id:
             print(f"  批次表: {dataset_id}.quickbi_batch_{batch_id}")
@@ -243,6 +254,11 @@ def main():
     # 获取 Overview 数据 (total_revenue)
     overview_data = fetch_overview_data(stat_date)
 
+    # 计算 total_spend 并添加到 overview_data
+    total_spend = sum(float(row.get('spend', 0) or 0) for row in data)
+    overview_data['total_spend'] = total_spend
+    print(f'[Overview] total_spend: ${total_spend:,.2f}')
+
     # 生成批次 ID（使用北京时间）
     batch_id = datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M%S')
     print(f"\n=== 批次 ID: {batch_id} ===")
@@ -257,7 +273,7 @@ def main():
     bq_dataset = os.getenv('QUICKBI_BQ_DATASET_ID', 'quickbi_data')
 
     if bq_project and bq_dataset:
-        upload_to_bigquery(data, bq_project, bq_dataset, batch_id, overview_data)
+        upload_to_bigquery(data, bq_project, bq_dataset, batch_id, overview_data, stat_date)
     else:
         print("⚠ 未配置 BigQuery，跳过落库")
         print("  请在 .env 文件中设置 BQ_PROJECT_ID 和 BQ_DATASET_ID")
