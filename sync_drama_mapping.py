@@ -1,7 +1,11 @@
 """
 自动同步 drama_mapping 表
-从 QuickBI 同步新的 drama_id 和 drama_name 到 BigQuery
+从 QuickBI 和 Google Sheets 同步 drama_id → drama_name 到 BigQuery
+支持：
+- QuickBI → BigQuery drama_mapping 表（增量同步）
+- Google Sheets → BigQuery quickbi_campaigns 表（回填空 drama_name）
 """
+import json
 import os
 import sys
 from datetime import datetime
@@ -120,6 +124,124 @@ class DramaMappingSync:
         logger.info(f"插入完成: 成功 {success_count}, 失败 {fail_count}")
         return success_count
 
+    def fetch_google_sheets_mapping(self):
+        """从 Google Sheets 读取 drama_id → drama_name 映射"""
+        try:
+            import gspread
+            from google.oauth2.service_account import Credentials
+            import google.auth
+        except ImportError:
+            logger.error("gspread 未安装，跳过 Google Sheets 同步")
+            return {}
+
+        sheets_url = os.getenv(
+            'DRAMA_SHEETS_URL',
+            'https://docs.google.com/spreadsheets/d/1nNz7RcHirkyp5gD-7p3stkV5vPks15YQMYbBZSyi21o/edit'
+        )
+        # EN sheet gid
+        en_sheet_id = int(os.getenv('DRAMA_SHEETS_EN_GID', '852324189'))
+
+        logger.info("从 Google Sheets 读取 drama 映射...")
+        scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+
+        # Cloud Run 环境用 ADC，本地用 service account 文件
+        creds_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
+        if not creds_path:
+            creds_path = os.path.join(os.path.dirname(__file__), 'fleet-blend-469520-n7-1a29eac22376.json')
+
+        if os.path.exists(creds_path):
+            creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+        else:
+            logger.info("凭证文件不存在，使用 ADC 默认凭证")
+            creds, _ = google.auth.default(scopes=scopes)
+
+        gc = gspread.authorize(creds)
+
+        sh = gc.open_by_url(sheets_url)
+        ws = sh.get_worksheet_by_id(en_sheet_id)
+        rows = ws.get_all_records()
+
+        mapping = {}
+        for r in rows:
+            drama_id = str(r.get('id', '')).strip()
+            title = str(r.get('title', '')).strip()
+            if drama_id and title:
+                mapping[drama_id] = title
+
+        logger.info(f"从 Google Sheets 获取到 {len(mapping)} 个 drama 映射")
+
+        # 同时更新本地 drama_mapping.json
+        json_path = os.path.join(os.path.dirname(__file__), 'drama_mapping.json')
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(mapping, f, ensure_ascii=False, indent=2)
+        logger.info(f"已更新本地 {json_path}")
+
+        return mapping
+
+    def backfill_drama_names(self, sheets_mapping=None):
+        """回填 BigQuery 中 drama_name 为空的记录"""
+        if not sheets_mapping:
+            # 尝试从本地 JSON 读取
+            json_path = os.path.join(os.path.dirname(__file__), 'drama_mapping.json')
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    sheets_mapping = json.load(f)
+            else:
+                logger.info("无映射数据，跳过回填")
+                return 0
+
+        # 查询 drama_name 为空但 drama_id 不为空的记录
+        query = f"""
+        SELECT DISTINCT drama_id
+        FROM `{self.project_id}.{self.quickbi_dataset}.quickbi_campaigns`
+        WHERE drama_id IS NOT NULL
+          AND drama_id != ''
+          AND (drama_name IS NULL OR drama_name = '' OR drama_name = '<nil>')
+        """
+        logger.info("查询 drama_name 为空的记录...")
+        results = self.client.query(query).result()
+
+        missing_ids = [row.drama_id for row in results]
+        logger.info(f"发现 {len(missing_ids)} 个 drama_id 缺少 drama_name")
+
+        if not missing_ids:
+            return 0
+
+        updated = 0
+        for drama_id in missing_ids:
+            drama_name = sheets_mapping.get(drama_id)
+            if not drama_name:
+                # sheets_mapping 的 value 可能是 dict 格式 {"name": ..., "programCode": ...}
+                entry = sheets_mapping.get(drama_id)
+                if isinstance(entry, dict):
+                    drama_name = entry.get('name')
+            if not drama_name:
+                logger.info(f"  跳过 {drama_id}: 映射中无对应剧名")
+                continue
+
+            update_query = f"""
+            UPDATE `{self.project_id}.{self.quickbi_dataset}.quickbi_campaigns`
+            SET drama_name = @drama_name
+            WHERE drama_id = @drama_id
+              AND (drama_name IS NULL OR drama_name = '' OR drama_name = '<nil>')
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("drama_name", "STRING", drama_name),
+                    bigquery.ScalarQueryParameter("drama_id", "STRING", drama_id),
+                ]
+            )
+            try:
+                job = self.client.query(update_query, job_config=job_config)
+                job.result()
+                logger.info(f"  ✓ 回填成功: {drama_id} → {drama_name} ({job.num_dml_affected_rows} 行)")
+                updated += 1
+            except Exception as e:
+                logger.error(f"  ✗ 回填失败: {drama_id}: {e}")
+
+        logger.info(f"回填完成: 更新 {updated} 个 drama_id")
+        return updated
+
     def sync(self):
         """执行同步"""
         logger.info("=" * 80)
@@ -146,6 +268,12 @@ class DramaMappingSync:
                 logger.info(f"\n同步完成: 成功插入 {success_count} 个新映射")
             else:
                 logger.info("\n没有发现新的映射，无需同步")
+
+            # 5. 从 Google Sheets 同步并回填空 drama_name
+            logger.info("\n--- Google Sheets 同步 ---")
+            sheets_mapping = self.fetch_google_sheets_mapping()
+            if sheets_mapping:
+                self.backfill_drama_names(sheets_mapping)
 
             logger.info("=" * 80)
             return True

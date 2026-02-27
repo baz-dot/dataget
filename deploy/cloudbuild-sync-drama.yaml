@@ -1,0 +1,5 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/fleet-blend-469520-n7/drama-mapping-sync', '-f', 'deploy/Dockerfile.sync-drama', '.']
+images:
+  - 'gcr.io/fleet-blend-469520-n7/drama-mapping-sync'

@@ -1,0 +1,175 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: '选择部署目标'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - quickbi
+          - scheduler
+
+env:
+  PROJECT_ID: fleet-blend-469520-n7
+  QUICKBI_REGION: asia-northeast3
+  SCHEDULER_REGION: asia-northeast1
+  SERVICE_ACCOUNT: xmp-data-scraper@fleet-blend-469520-n7.iam.gserviceaccount.com
+
+jobs:
+  # ============================================================
+  # 检测哪些文件变更了，决定部署哪些服务
+  # ============================================================
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      quickbi: ${{ steps.filter.outputs.quickbi }}
+      scheduler: ${{ steps.filter.outputs.scheduler }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            quickbi:
+              - 'quickbi/**'
+              - 'bigquery_storage.py'
+              - 'gcs_storage.py'
+              - 'utils/**'
+              - 'deploy/Dockerfile.quickbi'
+              - 'deploy/cloudbuild-quickbi.yaml'
+            scheduler:
+              - 'scheduler.py'
+              - 'lark/**'
+              - 'rule_engine.py'
+              - 'config/**'
+              - 'deploy/Dockerfile.scheduler'
+              - 'deploy/start_scheduler.py'
+              - 'deploy/cloudbuild-scheduler.yaml'
+
+  # ============================================================
+  # QuickBI 数据采集器部署
+  # ============================================================
+  deploy-quickbi:
+    needs: changes
+    if: |
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.service == 'quickbi' || github.event.inputs.service == 'all')) ||
+      (github.event_name == 'push' && needs.changes.outputs.quickbi == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build image via Cloud Build
+        run: |
+          gcloud builds submit \
+            --config=deploy/cloudbuild-quickbi.yaml \
+            --project=${{ env.PROJECT_ID }} \
+            .
+
+      - name: Update Cloud Run Job (hourly)
+        run: |
+          gcloud run jobs update quickbi-data-scraper \
+            --image gcr.io/${{ env.PROJECT_ID }}/quickbi-data-scraper \
+            --region ${{ env.QUICKBI_REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --service-account ${{ env.SERVICE_ACCOUNT }} \
+            --memory 1Gi \
+            --cpu 1 \
+            --task-timeout 10m \
+            --max-retries 2 \
+            --set-env-vars "GCS_BUCKET_NAME=xmp_raw_data_storage" \
+            --set-env-vars "BQ_PROJECT_ID=${{ env.PROJECT_ID }}" \
+            --set-env-vars "QUICKBI_BQ_DATASET_ID=quickbi_data" \
+            --set-env-vars "ALIYUN_ACCESS_KEY_ID=${{ secrets.ALIYUN_ACCESS_KEY_ID }}" \
+            --set-env-vars "ALIYUN_ACCESS_KEY_SECRET=${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}" \
+            --set-env-vars "CLOUD_RUN=true" \
+            --set-env-vars "TZ=Asia/Shanghai" \
+            --quiet
+
+      - name: Update Cloud Run Job (daily T-1)
+        run: |
+          gcloud run jobs update quickbi-data-scraper-daily \
+            --image gcr.io/${{ env.PROJECT_ID }}/quickbi-data-scraper \
+            --region ${{ env.QUICKBI_REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --service-account ${{ env.SERVICE_ACCOUNT }} \
+            --memory 1Gi \
+            --cpu 1 \
+            --task-timeout 10m \
+            --max-retries 2 \
+            --set-env-vars "GCS_BUCKET_NAME=xmp_raw_data_storage" \
+            --set-env-vars "BQ_PROJECT_ID=${{ env.PROJECT_ID }}" \
+            --set-env-vars "QUICKBI_BQ_DATASET_ID=quickbi_data" \
+            --set-env-vars "ALIYUN_ACCESS_KEY_ID=${{ secrets.ALIYUN_ACCESS_KEY_ID }}" \
+            --set-env-vars "ALIYUN_ACCESS_KEY_SECRET=${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}" \
+            --set-env-vars "CLOUD_RUN=true" \
+            --set-env-vars "TZ=Asia/Shanghai" \
+            --set-env-vars "FETCH_YESTERDAY=true" \
+            --quiet
+
+  # ============================================================
+  # Scheduler 播报调度器部署
+  # ============================================================
+  deploy-scheduler:
+    needs: changes
+    if: |
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.service == 'scheduler' || github.event.inputs.service == 'all')) ||
+      (github.event_name == 'push' && needs.changes.outputs.scheduler == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build image via Cloud Build
+        run: |
+          gcloud builds submit \
+            --config=deploy/cloudbuild-scheduler.yaml \
+            --project=${{ env.PROJECT_ID }} \
+            .
+
+      - name: Deploy to Cloud Run Service
+        run: |
+          gcloud run deploy lark-realtime-scheduler \
+            --image gcr.io/${{ env.PROJECT_ID }}/lark-realtime-scheduler \
+            --platform managed \
+            --region ${{ env.SCHEDULER_REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --no-allow-unauthenticated \
+            --timeout 3600 \
+            --memory 1Gi \
+            --min-instances 1 \
+            --max-instances 1 \
+            --set-env-vars "TZ=Asia/Shanghai" \
+            --set-env-vars "BQ_PROJECT_ID=${{ env.PROJECT_ID }}" \
+            --set-env-vars "BQ_DATASET_ID=quickbi_data" \
+            --set-env-vars "LARK_WEBHOOK_URL=${{ secrets.LARK_WEBHOOK_URL }}" \
+            --set-env-vars "LARK_APP_ID=${{ secrets.LARK_APP_ID }}" \
+            --set-env-vars "LARK_APP_SECRET=${{ secrets.LARK_APP_SECRET }}" \
+            --set-env-vars "WEEKLY_REPORT_DOC_TOKEN=${{ secrets.WEEKLY_REPORT_DOC_TOKEN }}" \
+            --set-env-vars "XMP_CLIENT_ID=${{ secrets.XMP_CLIENT_ID }}" \
+            --set-env-vars "XMP_CLIENT_SECRET=${{ secrets.XMP_CLIENT_SECRET }}" \
+            --set-env-vars "RULE_STOP_LOSS_MIN_SPEND=300" \
+            --set-env-vars "RULE_STOP_LOSS_MAX_ROAS=0.30" \
+            --quiet

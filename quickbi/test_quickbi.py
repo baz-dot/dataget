@@ -132,7 +132,8 @@ def fetch_quickbi_data(stat_date: str = None):
 
 def fetch_overview_data(stat_date: str = None):
     """
-    从 Quick BI 获取 Overview 数据 (total_revenue)
+    从 Quick BI 获取 Overview 数据 (total_revenue + total_spend)
+    total_spend 从 overview API 的 acquisition_cost 聚合字段获取，避免 campaign API 10000 行截断
     """
     if stat_date is None:
         stat_date = datetime.now(BEIJING_TZ).strftime('%Y%m%d')
@@ -157,12 +158,14 @@ def fetch_overview_data(stat_date: str = None):
         if response.body.result and response.body.result.values:
             data = response.body.result.values[0]
             total_revenue = float(data.get('total_revenue', 0) or 0)
+            total_spend = float(data.get('acquisition_cost', 0) or 0)
             print(f'[Overview] total_revenue: ${total_revenue:,.2f}')
-            return {'total_revenue': total_revenue}
+            print(f'[Overview] total_spend (from acquisition_cost): ${total_spend:,.2f}')
+            return {'total_revenue': total_revenue, 'total_spend': total_spend}
     except Exception as e:
         print(f'[Overview] 获取失败: {e}')
 
-    return {'total_revenue': 0}
+    return {'total_revenue': 0, 'total_spend': 0}
 
 
 def upload_to_gcs(data: list, bucket_name: str, batch_id: str = None):
@@ -251,13 +254,9 @@ def main():
         print("未获取到数据")
         return
 
-    # 获取 Overview 数据 (total_revenue)
+    # 获取 Overview 数据 (total_revenue + total_spend)
+    # total_spend 直接从 overview API 的 acquisition_cost 聚合获取，不受 10000 行截断影响
     overview_data = fetch_overview_data(stat_date)
-
-    # 计算 total_spend 并添加到 overview_data
-    total_spend = sum(float(row.get('spend', 0) or 0) for row in data)
-    overview_data['total_spend'] = total_spend
-    print(f'[Overview] total_spend: ${total_spend:,.2f}')
 
     # 生成批次 ID（使用北京时间）
     batch_id = datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M%S')

@@ -471,6 +471,10 @@ class BrainScheduler:
         schedule.every().monday.at("09:30").do(self.send_weekly_report)
         print(f"[Scheduler] 已设置每周一 09:30 周报")
 
+        # 设置每周一 02:30 drama 映射同步（Google Sheets → BigQuery 回填）
+        schedule.every().monday.at("02:30").do(self.sync_drama_mapping)
+        print(f"[Scheduler] 已设置每周一 02:30 drama 映射同步")
+
         # 设置每日 02:00 XMP 投手/剪辑师统计同步 (统计前一天数据)
         schedule.every().day.at("02:00").do(self.sync_xmp_stats)
         print(f"[Scheduler] 已设置每日 02:00 XMP 统计同步")
@@ -565,6 +569,41 @@ class BrainScheduler:
                     alert_type="XMP 统计同步失败",
                     message=error_msg,
                     level="error"
+                )
+
+        return result
+
+    def sync_drama_mapping(self) -> dict:
+        """
+        同步 drama 映射（每周一 02:30 触发）
+        从 Google Sheets 读取映射，回填 BigQuery 中空的 drama_name
+
+        Returns:
+            同步结果
+        """
+        print(f"\n{'='*60}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 同步 drama 映射...")
+        print(f"{'='*60}")
+
+        result = {"success": False, "error": None}
+
+        try:
+            from sync_drama_mapping import DramaMappingSync
+            syncer = DramaMappingSync()
+            success = syncer.sync()
+            result["success"] = success
+            print(f"[Drama] 映射同步{'成功' if success else '失败'}")
+
+        except Exception as e:
+            error_msg = f"Drama 映射同步失败: {str(e)}"
+            print(f"[Error] {error_msg}")
+            result["error"] = error_msg
+
+            if self.lark_bot:
+                self.lark_bot.send_alert(
+                    alert_type="Drama 映射同步失败",
+                    message=error_msg,
+                    level="warning"
                 )
 
         return result

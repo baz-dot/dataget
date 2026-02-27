@@ -5,7 +5,7 @@
 # 配置变量
 PROJECT_ID="fleet-blend-469520-n7"
 SERVICE_NAME="drama-mapping-sync"
-REGION="asia-northeast1"
+REGION="asia-northeast3"
 JOB_NAME="sync-drama-mapping-daily"
 SCHEDULE="0 2 * * *"  # 每天凌晨 2 点（北京时间）
 TIMEZONE="Asia/Shanghai"
