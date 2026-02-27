@@ -304,6 +304,9 @@ SUPPORTED_CHANNELS = list(CHANNEL_CONFIG.keys())
 # API 端点
 XMP_LIST_URL = "https://xmp-api.mobvista.com/admanage/channel/list"
 XMP_SUMMARY_URL = "https://xmp-api.mobvista.com/admanage/channel/summary"
+
+# 全局 API 并发限制，防止触发 XMP 限流
+XMP_API_SEM = asyncio.Semaphore(3)
 XMP_MATERIAL_LIST_URL = "https://xmp-api.mobvista.com/mediacenter/material/list"
 
 # XMP Open API 端点 (素材库/素材报表)
@@ -319,7 +322,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         channel: str,
         start_date: str = None,
         end_date: str = None,
-        page_size: int = 100
+        page_size: int = 1000
     ) -> Optional[List[Dict[str, Any]]]:
         """
         获取指定渠道的 campaign 明细数据
@@ -359,6 +362,8 @@ class XMPMultiChannelScraper(XMPBaseScraper):
 
         all_campaigns = []
         page = 1
+        page_retries = 0
+        MAX_PAGE_RETRIES = 2
 
         headers = {
             "Authorization": self.bearer_token,
@@ -387,58 +392,70 @@ class XMPMultiChannelScraper(XMPBaseScraper):
             }
 
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        XMP_LIST_URL,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as response:
-                        result = await response.json()
+                async with XMP_API_SEM:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            XMP_LIST_URL,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        ) as response:
+                            result = await response.json()
 
-                        if result.get('code') != 0:
-                            print(f"[XMP] API 错误: {result.get('msg')}")
-                            break
+                if result.get('code') != 0:
+                    msg = result.get('msg', '')
+                    if '繁忙' in msg or 'busy' in msg.lower():
+                        print(f"[XMP] {channel} campaigns 限流，10s 后重试 (第{page}页)...")
+                        await asyncio.sleep(10)
+                        continue  # 重试当前页
+                    print(f"[XMP] API 错误: {msg}")
+                    break
 
-                        data = result.get('data', {})
-                        campaigns = data.get('list', [])
+                page_retries = 0  # 成功则重置重试计数
+                data = result.get('data', {})
+                campaigns = data.get('list', [])
 
-                        if not campaigns:
-                            break
+                if not campaigns:
+                    break
 
-                        for c in campaigns:
-                            cost = float(c.get('cost', 0))
-                            # 收入 = 所有收入字段之和
-                            revenue = sum(float(c.get(f, 0)) for f in revenue_fields)
-                            # TikTok 收入明细
-                            tk_complete = float(c.get('total_complete_payment_rate', 0)) if channel == 'tiktok' else 0
-                            tk_purchase = float(c.get('total_purchase_value', 0)) if channel == 'tiktok' else 0
-                            all_campaigns.append({
-                                'channel': channel,
-                                'campaign_id': c.get('campaign_id'),
-                                'campaign_name': c.get('campaign_name'),
-                                'cost': cost,
-                                'revenue': revenue,
-                                'tk_complete_payment': tk_complete,
-                                'tk_purchase_value': tk_purchase,
-                                'roas': revenue / cost if cost > 0 else 0,
-                                'impression': int(c.get('impression', 0)),
-                                'click': int(c.get('click', 0)),
-                                'status': c.get('status', ''),
-                                'geo': c.get('geo', ''),
-                                'date': start_date,
-                            })
+                for c in campaigns:
+                    cost = float(c.get('cost', 0))
+                    # 收入 = 所有收入字段之和
+                    revenue = sum(float(c.get(f, 0)) for f in revenue_fields)
+                    # TikTok 收入明细
+                    tk_complete = float(c.get('total_complete_payment_rate', 0)) if channel == 'tiktok' else 0
+                    tk_purchase = float(c.get('total_purchase_value', 0)) if channel == 'tiktok' else 0
+                    all_campaigns.append({
+                        'channel': channel,
+                        'campaign_id': c.get('campaign_id'),
+                        'campaign_name': c.get('campaign_name'),
+                        'cost': cost,
+                        'revenue': revenue,
+                        'tk_complete_payment': tk_complete,
+                        'tk_purchase_value': tk_purchase,
+                        'roas': revenue / cost if cost > 0 else 0,
+                        'impression': int(c.get('impression', 0)),
+                        'click': int(c.get('click', 0)),
+                        'status': c.get('status', ''),
+                        'geo': c.get('geo', ''),
+                        'date': start_date,
+                    })
 
-                        print(f"  第 {page} 页: {len(campaigns)} 条")
+                print(f"  第 {page} 页: {len(campaigns)} 条")
 
-                        if len(campaigns) < page_size:
-                            break
+                if len(campaigns) < page_size:
+                    break
 
-                        page += 1
-                        await asyncio.sleep(0.5)
+                page += 1
+                await asyncio.sleep(0.5)
 
-            except Exception as e:
-                print(f"[XMP] 请求失败: {e}")
+            except (asyncio.TimeoutError, aiohttp.ClientError, Exception) as e:
+                page_retries += 1
+                if page_retries <= MAX_PAGE_RETRIES:
+                    print(f"[XMP] {channel} campaigns 第{page}页失败: {type(e).__name__}，5s 后重试 ({page_retries}/{MAX_PAGE_RETRIES})...")
+                    await asyncio.sleep(5)
+                    continue
+                print(f"[XMP] {channel} campaigns 第{page}页重试用尽，已获取 {len(all_campaigns)} 条")
                 break
 
         print(f"[XMP] {channel} 共获取 {len(all_campaigns)} 个 campaign")
@@ -449,7 +466,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         channel: str,
         start_date: str = None,
         end_date: str = None,
-        page_size: int = 100
+        page_size: int = 1000
     ) -> Optional[List[Dict[str, Any]]]:
         """
         获取指定渠道的广告维度数据 (用于剪辑师分渠道统计)
@@ -485,6 +502,8 @@ class XMPMultiChannelScraper(XMPBaseScraper):
 
         all_ads = []
         page = 1
+        page_retries = 0
+        MAX_PAGE_RETRIES = 2
 
         headers = {
             "Authorization": self.bearer_token,
@@ -507,62 +526,75 @@ class XMPMultiChannelScraper(XMPBaseScraper):
                 "field": f"ad_name,ad_id,status,cost,impression,click,cpm,cpc,ctr,conversion,cpi,{revenue_fields_str}",
                 "page": page,
                 "page_size": page_size,
-                "report_timezone": ""
+                "report_timezone": "",
+                "search": [{"item": "cost", "val": "0", "op": "GT"}]
             }
 
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        XMP_LIST_URL,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as response:
-                        result = await response.json()
+                async with XMP_API_SEM:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            XMP_LIST_URL,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        ) as response:
+                            result = await response.json()
 
-                        if result.get('code') != 0:
-                            print(f"[XMP] API 错误: {result.get('msg')}")
-                            break
+                if result.get('code') != 0:
+                    msg = result.get('msg', '')
+                    if '繁忙' in msg or 'busy' in msg.lower():
+                        print(f"[XMP] {channel} ads 限流，10s 后重试 (第{page}页)...")
+                        await asyncio.sleep(10)
+                        continue
+                    print(f"[XMP] API 错误: {msg}")
+                    break
 
-                        data = result.get('data', {})
-                        ads = data.get('list', [])
+                page_retries = 0
+                data = result.get('data', {})
+                ads = data.get('list', [])
 
-                        if not ads:
-                            break
+                if not ads:
+                    break
 
-                        for ad in ads:
-                            cost = float(ad.get('cost') or 0)
-                            # 计算收入: 累加所有收入字段
-                            revenue = 0
-                            for rf in revenue_fields:
-                                revenue += float(ad.get(rf) or 0)
+                for ad in ads:
+                    cost = float(ad.get('cost') or 0)
+                    # 计算收入: 累加所有收入字段
+                    revenue = 0
+                    for rf in revenue_fields:
+                        revenue += float(ad.get(rf) or 0)
 
-                            all_ads.append({
-                                'channel': channel,
-                                'ad_id': ad.get('ad_id'),
-                                'ad_name': ad.get('ad_name'),
-                                'cost': cost,
-                                'revenue': revenue,
-                                'impression': int(ad.get('impression') or 0),
-                                'click': int(ad.get('click') or 0),
-                                'conversion': float(ad.get('conversion') or 0),
-                                'cpm': float(ad.get('cpm') or 0),
-                                'cpc': float(ad.get('cpc') or 0),
-                                'ctr': float(ad.get('ctr') or 0),
-                                'status': ad.get('status', ''),
-                                'date': start_date,
-                            })
+                    all_ads.append({
+                        'channel': channel,
+                        'ad_id': ad.get('ad_id'),
+                        'ad_name': ad.get('ad_name'),
+                        'cost': cost,
+                        'revenue': revenue,
+                        'impression': int(ad.get('impression') or 0),
+                        'click': int(ad.get('click') or 0),
+                        'conversion': float(ad.get('conversion') or 0),
+                        'cpm': float(ad.get('cpm') or 0),
+                        'cpc': float(ad.get('cpc') or 0),
+                        'ctr': float(ad.get('ctr') or 0),
+                        'status': ad.get('status', ''),
+                        'date': start_date,
+                    })
 
-                        print(f"  第 {page} 页: {len(ads)} 条广告")
+                print(f"  第 {page} 页: {len(ads)} 条广告")
 
-                        if len(ads) < page_size:
-                            break
+                if len(ads) < page_size:
+                    break
 
-                        page += 1
-                        await asyncio.sleep(0.5)
+                page += 1
+                await asyncio.sleep(0.5)
 
-            except Exception as e:
-                print(f"[XMP] 请求失败: {e}")
+            except (asyncio.TimeoutError, aiohttp.ClientError, Exception) as e:
+                page_retries += 1
+                if page_retries <= MAX_PAGE_RETRIES:
+                    print(f"[XMP] {channel} ads 第{page}页失败: {type(e).__name__}，5s 后重试 ({page_retries}/{MAX_PAGE_RETRIES})...")
+                    await asyncio.sleep(5)
+                    continue
+                print(f"[XMP] {channel} ads 第{page}页重试用尽，已获取 {len(all_ads)} 条")
                 break
 
         print(f"[XMP] {channel} 共获取 {len(all_ads)} 条广告")
@@ -573,7 +605,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         channel: str,
         start_date: str = None,
         end_date: str = None,
-        page_size: int = 100,
+        page_size: int = 1000,
         is_xmp: str = "0"
     ) -> Optional[List[Dict[str, Any]]]:
         """
@@ -607,6 +639,8 @@ class XMPMultiChannelScraper(XMPBaseScraper):
 
         all_designers = []
         page = 1
+        page_retries = 0
+        MAX_PAGE_RETRIES = 2
 
         headers = {
             "Authorization": self.bearer_token,
@@ -636,56 +670,68 @@ class XMPMultiChannelScraper(XMPBaseScraper):
             }
 
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        XMP_LIST_URL,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as response:
-                        result = await response.json()
+                async with XMP_API_SEM:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            XMP_LIST_URL,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        ) as response:
+                            result = await response.json()
 
-                        if result.get('code') != 0:
-                            print(f"[XMP] API 错误: {result.get('msg')}")
-                            break
+                if result.get('code') != 0:
+                    msg = result.get('msg', '')
+                    if '繁忙' in msg or 'busy' in msg.lower():
+                        print(f"[XMP] {channel} designers 限流，10s 后重试 (第{page}页)...")
+                        await asyncio.sleep(10)
+                        continue
+                    print(f"[XMP] API 错误: {msg}")
+                    break
 
-                        data = result.get('data', {})
-                        designers = data.get('list', [])
+                page_retries = 0
+                data = result.get('data', {})
+                designers = data.get('list', [])
 
-                        if not designers:
-                            break
+                if not designers:
+                    break
 
-                        for d in designers:
-                            # 使用 safe_float 处理可能的 '-' 值
-                            cost = safe_float(d.get('currency_cost')) or safe_float(d.get('cost'))
-                            # 计算收入
-                            revenue = 0
-                            for rf in revenue_fields:
-                                revenue += safe_float(d.get(rf))
+                for d in designers:
+                    # 使用 safe_float 处理可能的 '-' 值
+                    cost = safe_float(d.get('currency_cost')) or safe_float(d.get('cost'))
+                    # 计算收入
+                    revenue = 0
+                    for rf in revenue_fields:
+                        revenue += safe_float(d.get(rf))
 
-                            all_designers.append({
-                                'channel': channel,
-                                'designer_name': d.get('designer_name'),
-                                'cost': cost,
-                                'revenue': revenue,
-                                'impression': safe_int(d.get('impression')),
-                                'click': safe_int(d.get('click')),
-                                'cpm': safe_float(d.get('cpm')),
-                                'cpc': safe_float(d.get('cpc')),
-                                'ctr': safe_float(d.get('ctr')),
-                                'date': start_date,
-                            })
+                    all_designers.append({
+                        'channel': channel,
+                        'designer_name': d.get('designer_name'),
+                        'cost': cost,
+                        'revenue': revenue,
+                        'impression': safe_int(d.get('impression')),
+                        'click': safe_int(d.get('click')),
+                        'cpm': safe_float(d.get('cpm')),
+                        'cpc': safe_float(d.get('cpc')),
+                        'ctr': safe_float(d.get('ctr')),
+                        'date': start_date,
+                    })
 
-                        print(f"  第 {page} 页: {len(designers)} 条")
+                print(f"  第 {page} 页: {len(designers)} 条")
 
-                        if len(designers) < page_size:
-                            break
+                if len(designers) < page_size:
+                    break
 
-                        page += 1
-                        await asyncio.sleep(0.5)
+                page += 1
+                await asyncio.sleep(0.5)
 
-            except Exception as e:
-                print(f"[XMP] 请求失败: {e}")
+            except (asyncio.TimeoutError, aiohttp.ClientError, Exception) as e:
+                page_retries += 1
+                if page_retries <= MAX_PAGE_RETRIES:
+                    print(f"[XMP] {channel} designers 第{page}页失败: {type(e).__name__}，5s 后重试 ({page_retries}/{MAX_PAGE_RETRIES})...")
+                    await asyncio.sleep(5)
+                    continue
+                print(f"[XMP] {channel} designers 第{page}页重试用尽，已获取 {len(all_designers)} 条")
                 break
 
         print(f"[XMP] {channel} 共获取 {len(all_designers)} 条 designer 数据")
@@ -732,30 +778,31 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    XMP_SUMMARY_URL,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    result = await response.json()
+            async with XMP_API_SEM:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        XMP_SUMMARY_URL,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        result = await response.json()
 
-                    if result.get('code') == 0:
-                        sum_data = result.get('data', {}).get('sum', {})
-                        cost = float(sum_data.get('cost', 0))
-                        # 收入 = 所有收入字段之和
-                        revenue = sum(float(sum_data.get(f, 0)) for f in revenue_fields)
+            if result.get('code') == 0:
+                sum_data = result.get('data', {}).get('sum', {})
+                cost = float(sum_data.get('cost', 0))
+                # 收入 = 所有收入字段之和
+                revenue = sum(float(sum_data.get(f, 0)) for f in revenue_fields)
 
-                        return {
-                            'channel': channel,
-                            'date': start_date,
-                            'cost': cost,
-                            'revenue': revenue,
-                            'roas': revenue / cost if cost > 0 else 0,
-                            'impression': int(sum_data.get('impression', 0)),
-                            'click': int(sum_data.get('click', 0)),
-                        }
+                return {
+                    'channel': channel,
+                    'date': start_date,
+                    'cost': cost,
+                    'revenue': revenue,
+                    'roas': revenue / cost if cost > 0 else 0,
+                    'impression': int(sum_data.get('impression', 0)),
+                    'click': int(sum_data.get('click', 0)),
+                }
         except Exception as e:
             print(f"[XMP] {channel} 汇总请求失败: {e}")
 
@@ -792,21 +839,29 @@ class XMPMultiChannelScraper(XMPBaseScraper):
             'date': start_date
         }
 
-        for channel in SUPPORTED_CHANNELS:
-            print(f"\n--- {channel.upper()} ---")
+        # 确保 Token 已获取（避免并行时重复登录）
+        if not self.bearer_token or self._should_refresh_token():
+            print("[XMP] 需要获取/刷新 Token...")
+            await self.login_and_get_token()
 
-            # 获取汇总
+        # 并行拉取所有渠道
+        async def _fetch_single_channel(channel):
+            print(f"\n--- {channel.upper()} ---")
             summary = await self.fetch_channel_summary(channel, start_date, end_date)
             if summary:
-                result['summary'][channel] = summary
                 print(f"  汇总: cost=${summary['cost']:,.2f}, revenue=${summary['revenue']:,.2f}, ROAS={summary['roas']*100:.1f}%")
-
-            # 获取明细
             campaigns = await self.fetch_channel_campaigns(channel, start_date, end_date)
+            return channel, summary, campaigns
+
+        channel_results = await asyncio.gather(
+            *[_fetch_single_channel(ch) for ch in SUPPORTED_CHANNELS]
+        )
+
+        for channel, summary, campaigns in channel_results:
+            if summary:
+                result['summary'][channel] = summary
             if campaigns:
                 result['campaigns'].extend(campaigns)
-
-            await asyncio.sleep(1)
 
         # 打印总汇总
         total_cost = sum(s['cost'] for s in result['summary'].values())
@@ -1415,6 +1470,9 @@ class XMPEditorStatsScraper(XMPBaseScraper):
 
 async def run_once(date_str: str = None, upload_bq: bool = False):
     """执行一次抓取（包含投手/剪辑师统计）"""
+    import time as _time
+    _t0 = _time.time()
+
     if not date_str:
         date_str = datetime.now().strftime('%Y-%m-%d')
 
@@ -1426,22 +1484,22 @@ async def run_once(date_str: str = None, upload_bq: bool = False):
         print("[XMP] 无 campaign 数据")
         return result
 
-    # 聚合投手统计 (使用 summary API)
-    optimizer_stats = await fetch_optimizer_summary_stats(scraper.bearer_token, date_str)
+    # 并行获取: 投手统计 + 剪辑师数据 (Meta designers × 2 + TikTok ads)
+    optimizer_task = fetch_optimizer_summary_stats(scraper.bearer_token, date_str)
+    designers_0_task = scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="0")
+    designers_1_task = scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="1")
+    tk_ads_task = scraper.fetch_channel_ads('tiktok', date_str, date_str)
 
-    # 获取剪辑师数据 (分渠道，不同渠道用不同方式)
+    optimizer_stats, designers_0, designers_1, tk_ads = await asyncio.gather(
+        optimizer_task, designers_0_task, designers_1_task, tk_ads_task
+    )
+
+    # 汇总剪辑师数据
     editor_stats = []
 
-    # Meta: 使用 designer 维度 API (同时获取 is_xmp=0 和 is_xmp=1 的数据)
     meta_designers = []
-
-    # 获取 is_xmp=0 的剪辑师
-    designers_0 = await scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="0")
     if designers_0:
         meta_designers.extend(designers_0)
-
-    # 获取 is_xmp=1 的剪辑师
-    designers_1 = await scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="1")
     if designers_1:
         meta_designers.extend(designers_1)
 
@@ -1466,8 +1524,6 @@ async def run_once(date_str: str = None, upload_bq: bool = False):
                 'top_material_roas': 0,
             })
 
-    # TikTok: 使用 ad 维度 API，从 ad_name 解析剪辑师
-    tk_ads = await scraper.fetch_channel_ads('tiktok', date_str, date_str)
     if tk_ads:
         tk_editor_stats = aggregate_editor_stats_from_ads(tk_ads, date_str)
         editor_stats.extend(tk_editor_stats)
@@ -1482,35 +1538,40 @@ async def run_once(date_str: str = None, upload_bq: bool = False):
     result['optimizer_stats'] = optimizer_stats
     result['editor_stats'] = editor_stats
 
-    # 上传到 BigQuery
+    # 后台上传到 BigQuery（不阻塞返回）
     if upload_bq:
-        try:
-            from bigquery_storage import BigQueryUploader
+        async def _bg_upload():
+            try:
+                from bigquery_storage import BigQueryUploader
 
-            project_id = os.getenv('BQ_PROJECT_ID')
-            dataset_id = os.getenv('BQ_DATASET_ID', 'xmp_data')
+                project_id = os.getenv('BQ_PROJECT_ID')
+                dataset_id = os.getenv('BQ_DATASET_ID', 'xmp_data')
 
-            if project_id:
-                batch_id = datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M%S')
-                uploader = BigQueryUploader(project_id, dataset_id)
+                if project_id:
+                    batch_id = datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M%S')
+                    uploader = BigQueryUploader(project_id, dataset_id)
+                    print(f"[BQ] 后台上传开始: {len(campaigns)} campaigns + {len(optimizer_stats)} 投手 + {len(editor_stats)} 剪辑师")
 
-                # 上传 campaign 数据
-                count1 = uploader.upload_xmp_internal_campaigns(campaigns, batch_id=batch_id)
-                print(f"[BQ] 已上传 {count1} 条 campaign 记录")
+                    count_c = uploader.upload_xmp_internal_campaigns(campaigns, batch_id=batch_id)
+                    print(f"[BQ] 已上传 {count_c} 条 campaign 记录")
 
-                # 上传投手统计
-                count2 = uploader.upload_optimizer_stats(optimizer_stats, batch_id=batch_id)
-                print(f"[BQ] 已上传 {count2} 条投手统计")
+                    count_o = uploader.upload_optimizer_stats(optimizer_stats, batch_id=batch_id)
+                    print(f"[BQ] 已上传 {count_o} 条投手统计")
 
-                # 上传剪辑师统计
-                count3 = uploader.upload_editor_stats(editor_stats, batch_id=batch_id)
-                print(f"[BQ] 已上传 {count3} 条剪辑师统计")
-            else:
-                print("[BQ] 未配置 BQ_PROJECT_ID，跳过上传")
-        except Exception as e:
-            print(f"[BQ] 上传失败: {e}")
-            send_lark_alert("XMP 数据上传失败", str(e), level="error")
+                    count_e = uploader.upload_editor_stats(editor_stats, batch_id=batch_id)
+                    print(f"[BQ] 已上传 {count_e} 条剪辑师统计")
 
+                    print(f"[BQ] 后台上传完成: batch_id={batch_id}")
+                else:
+                    print("[BQ] 未配置 BQ_PROJECT_ID，跳过上传")
+            except Exception as e:
+                print(f"[BQ] 后台上传失败: {e}")
+                send_lark_alert("XMP 数据上传失败", str(e), level="error")
+
+        asyncio.create_task(_bg_upload())
+
+    _elapsed = _time.time() - _t0
+    print(f"\n[XMP] run_once 总耗时: {_elapsed:.1f}秒 ({_elapsed/60:.1f}分钟)")
     return result
 
 
@@ -1543,7 +1604,8 @@ async def fetch_optimizer_summary_stats(
         "Referer": "https://xmp.mobvista.com/"
     }
 
-    for optimizer in optimizer_list:
+    async def _fetch_one_optimizer(optimizer):
+        """并行获取单个投手的所有渠道数据"""
         optimizer_data = {
             'stat_date': date_str,
             'name': optimizer,
@@ -1574,46 +1636,79 @@ async def fetch_optimizer_summary_stats(
             }
 
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        XMP_SUMMARY_URL,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as response:
-                        result = await response.json()
+                async with XMP_API_SEM:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            XMP_SUMMARY_URL,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        ) as response:
+                            result = await response.json()
 
-                        if result.get('code') != 0:
-                            print(f"[XMP] API 错误 ({optimizer}/{channel}): {result.get('msg')}")
+                if result.get('code') != 0:
+                    msg = result.get('msg', '')
+                    if '繁忙' in msg or 'busy' in msg.lower():
+                        print(f"[XMP] {optimizer}/{channel} 限流，10s 后重试...")
+                        await asyncio.sleep(10)
+                        # 重试
+                        try:
+                            async with XMP_API_SEM:
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.post(
+                                        XMP_SUMMARY_URL,
+                                        json=payload,
+                                        headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=30)
+                                    ) as response:
+                                        result = await response.json()
+                            if result.get('code') != 0:
+                                print(f"[XMP] API 重试仍失败 ({optimizer}/{channel}): {result.get('msg')}")
+                                continue
+                        except Exception as e:
+                            print(f"[XMP] 重试失败 ({optimizer}/{channel}): {e}")
                             continue
+                    else:
+                        print(f"[XMP] API 错误 ({optimizer}/{channel}): {msg}")
+                        continue
 
-                        sum_data = result.get('data', {}).get('sum', {})
-                        cost = float(sum_data.get('cost', 0) or 0)
-                        # TikTok 用 total_complete_payment_rate，Facebook 用 purchase_value
-                        if channel == 'tiktok':
-                            revenue = float(sum_data.get('total_complete_payment_rate', 0) or 0)
-                        else:
-                            revenue = float(sum_data.get('purchase_value', 0) or 0)
-                        roas = revenue / cost if cost > 0 else 0
+                sum_data = result.get('data', {}).get('sum', {})
+                cost = float(sum_data.get('cost', 0) or 0)
+                # TikTok 用 total_complete_payment_rate，Facebook 用 purchase_value
+                if channel == 'tiktok':
+                    revenue = float(sum_data.get('total_complete_payment_rate', 0) or 0)
+                else:
+                    revenue = float(sum_data.get('purchase_value', 0) or 0)
+                roas = revenue / cost if cost > 0 else 0
 
-                        if channel == 'tiktok':
-                            optimizer_data['tiktok_cost'] = cost
-                            optimizer_data['tiktok_revenue'] = revenue
-                            optimizer_data['tiktok_roas'] = roas
-                        else:
-                            optimizer_data['facebook_cost'] = cost
-                            optimizer_data['facebook_revenue'] = revenue
-                            optimizer_data['facebook_roas'] = roas
+                if channel == 'tiktok':
+                    optimizer_data['tiktok_cost'] = cost
+                    optimizer_data['tiktok_revenue'] = revenue
+                    optimizer_data['tiktok_roas'] = roas
+                else:
+                    optimizer_data['facebook_cost'] = cost
+                    optimizer_data['facebook_revenue'] = revenue
+                    optimizer_data['facebook_roas'] = roas
 
             except Exception as e:
                 print(f"[XMP] 请求失败 ({optimizer}/{channel}): {e}")
 
+        print(f"[XMP] {optimizer}: TT ${optimizer_data['tiktok_cost']:,.2f}, Meta ${optimizer_data['facebook_cost']:,.2f}")
+        return optimizer_data
+
+    # 并行获取所有投手数据
+    optimizer_data_list = await asyncio.gather(
+        *[_fetch_one_optimizer(opt) for opt in optimizer_list]
+    )
+
+    # 汇总结果
+    for optimizer_data in optimizer_data_list:
         # 分渠道添加记录 (export_stats_to_lark_doc 需要按 channel 区分)
         # TikTok 记录
         if optimizer_data['tiktok_cost'] > 0 or optimizer_data['tiktok_revenue'] > 0:
             results.append({
                 'stat_date': date_str,
-                'name': optimizer,
+                'name': optimizer_data['name'],
                 'channel': 'tiktok',
                 'total_cost': optimizer_data['tiktok_cost'],
                 'total_revenue': optimizer_data['tiktok_revenue'],
@@ -1624,14 +1719,12 @@ async def fetch_optimizer_summary_stats(
         if optimizer_data['facebook_cost'] > 0 or optimizer_data['facebook_revenue'] > 0:
             results.append({
                 'stat_date': date_str,
-                'name': optimizer,
+                'name': optimizer_data['name'],
                 'channel': 'facebook',
                 'total_cost': optimizer_data['facebook_cost'],
                 'total_revenue': optimizer_data['facebook_revenue'],
                 'roas': optimizer_data['facebook_roas'],
             })
-
-        print(f"[XMP] {optimizer}: TT ${optimizer_data['tiktok_cost']:,.2f}, Meta ${optimizer_data['facebook_cost']:,.2f}")
 
     return results
 
@@ -2308,19 +2401,24 @@ async def run_with_stats(date_str: str = None, upload_bq: bool = False):
         print("[XMP] 无 campaign 数据")
         return result
 
-    # 2. 聚合投手统计 (使用 summary API)
-    optimizer_stats = await fetch_optimizer_summary_stats(scraper.bearer_token, date_str)
+    # 2. 并行获取: 投手统计 + 剪辑师数据
+    optimizer_task = fetch_optimizer_summary_stats(scraper.bearer_token, date_str)
+    designers_0_task = scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="0")
+    designers_1_task = scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="1")
+    tk_ads_task = scraper.fetch_channel_ads('tiktok', date_str, date_str)
+
+    optimizer_stats, designers_0, designers_1, tk_ads = await asyncio.gather(
+        optimizer_task, designers_0_task, designers_1_task, tk_ads_task
+    )
+
     print(f"[XMP] 投手统计: {len(optimizer_stats)} 人")
 
-    # 3. 获取剪辑师数据 (分渠道，不同渠道用不同方式)
+    # 3. 汇总剪辑师数据
     editor_stats = []
 
-    # Meta: 使用 designer 维度 API (同时获取 is_xmp=0 和 is_xmp=1 的数据)
     meta_designers = []
-    designers_0 = await scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="0")
     if designers_0:
         meta_designers.extend(designers_0)
-    designers_1 = await scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="1")
     if designers_1:
         meta_designers.extend(designers_1)
 
@@ -2345,8 +2443,6 @@ async def run_with_stats(date_str: str = None, upload_bq: bool = False):
                 'top_material_roas': 0,
             })
 
-    # TikTok: 使用 ad 维度 API，从 ad_name 解析剪辑师
-    tk_ads = await scraper.fetch_channel_ads('tiktok', date_str, date_str)
     if tk_ads:
         tk_editor_stats = aggregate_editor_stats_from_ads(tk_ads, date_str)
         editor_stats.extend(tk_editor_stats)
@@ -2358,7 +2454,7 @@ async def run_with_stats(date_str: str = None, upload_bq: bool = False):
     result['optimizer_stats'] = optimizer_stats
     result['editor_stats'] = editor_stats
 
-    # 4. 上传到 BigQuery
+    # 4. 并行上传到 BigQuery
     if upload_bq:
         try:
             from bigquery_storage import BigQueryUploader
@@ -2370,17 +2466,24 @@ async def run_with_stats(date_str: str = None, upload_bq: bool = False):
                 batch_id = datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M%S')
                 uploader = BigQueryUploader(project_id, dataset_id)
 
-                # 上传 campaign 数据
-                count1 = uploader.upload_xmp_internal_campaigns(campaigns, batch_id=batch_id)
-                print(f"[BQ] 已上传 {count1} 条 campaign 记录")
+                async def _upload_campaigns():
+                    count = uploader.upload_xmp_internal_campaigns(campaigns, batch_id=batch_id)
+                    print(f"[BQ] 已上传 {count} 条 campaign 记录")
+                    return count
 
-                # 上传投手统计
-                count2 = uploader.upload_optimizer_stats(optimizer_stats, batch_id=batch_id)
-                print(f"[BQ] 已上传 {count2} 条投手统计")
+                async def _upload_optimizer():
+                    count = uploader.upload_optimizer_stats(optimizer_stats, batch_id=batch_id)
+                    print(f"[BQ] 已上传 {count} 条投手统计")
+                    return count
 
-                # 上传剪辑师统计
-                count3 = uploader.upload_editor_stats(editor_stats, batch_id=batch_id)
-                print(f"[BQ] 已上传 {count3} 条剪辑师统计")
+                async def _upload_editor():
+                    count = uploader.upload_editor_stats(editor_stats, batch_id=batch_id)
+                    print(f"[BQ] 已上传 {count} 条剪辑师统计")
+                    return count
+
+                await asyncio.gather(
+                    _upload_campaigns(), _upload_optimizer(), _upload_editor()
+                )
             else:
                 print("[BQ] 未配置 BQ_PROJECT_ID，跳过上传")
         except Exception as e:

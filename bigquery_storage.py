@@ -317,47 +317,59 @@ class BigQueryUploader:
             return None
         return (spend_val / impressions_val) * 1000
 
-    def _insert_rows_with_retry(self, table_ref: str, rows: List[Dict], max_retries: int = 3) -> List:
+    def _insert_rows_with_retry(self, table_ref: str, rows: List[Dict], max_retries: int = 3, batch_size: int = 5000) -> List:
         """
-        带重试的 BigQuery 插入操作
+        带重试和分批的 BigQuery 插入操作
 
         Args:
             table_ref: 表引用
             rows: 要插入的行
             max_retries: 最大重试次数
+            batch_size: 每批插入的行数
 
         Returns:
             错误列表，空列表表示成功
         """
-        last_errors = []
-        for attempt in range(max_retries):
-            try:
-                errors = self.client.insert_rows_json(table_ref, rows)
-                if not errors:
-                    return []
-                last_errors = errors
-                # 如果是可重试的错误，等待后重试
-                if attempt < max_retries - 1:
-                    delay = 2 ** attempt  # 指数退避: 1, 2, 4 秒
-                    logger.warning(f"BigQuery 插入失败 (尝试 {attempt + 1}/{max_retries}): {errors}, {delay}s 后重试...")
-                    time.sleep(delay)
-            except gcp_exceptions.ServiceUnavailable as e:
-                last_errors = [str(e)]
-                if attempt < max_retries - 1:
-                    delay = 2 ** attempt
-                    logger.warning(f"BigQuery 服务不可用 (尝试 {attempt + 1}/{max_retries}): {e}, {delay}s 后重试...")
-                    time.sleep(delay)
-            except gcp_exceptions.DeadlineExceeded as e:
-                last_errors = [str(e)]
-                if attempt < max_retries - 1:
-                    delay = 2 ** attempt
-                    logger.warning(f"BigQuery 请求超时 (尝试 {attempt + 1}/{max_retries}): {e}, {delay}s 后重试...")
-                    time.sleep(delay)
-            except Exception as e:
-                logger.error(f"BigQuery 插入异常: {e}")
-                return [str(e)]
+        all_errors = []
+        total_batches = (len(rows) + batch_size - 1) // batch_size
 
-        return last_errors
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            if total_batches > 1:
+                logger.info(f"BigQuery 分批上传: 第{batch_num}/{total_batches}批 ({len(batch)}行)")
+
+            for attempt in range(max_retries):
+                try:
+                    errors = self.client.insert_rows_json(table_ref, batch)
+                    if not errors:
+                        break
+                    if attempt < max_retries - 1:
+                        delay = 2 ** attempt
+                        logger.warning(f"BigQuery 插入失败 (批次{batch_num}, 尝试 {attempt + 1}/{max_retries}): {errors}, {delay}s 后重试...")
+                        time.sleep(delay)
+                    else:
+                        all_errors.extend(errors)
+                except gcp_exceptions.ServiceUnavailable as e:
+                    if attempt < max_retries - 1:
+                        delay = 2 ** attempt
+                        logger.warning(f"BigQuery 服务不可用 (批次{batch_num}, 尝试 {attempt + 1}/{max_retries}): {e}, {delay}s 后重试...")
+                        time.sleep(delay)
+                    else:
+                        all_errors.append(str(e))
+                except gcp_exceptions.DeadlineExceeded as e:
+                    if attempt < max_retries - 1:
+                        delay = 2 ** attempt
+                        logger.warning(f"BigQuery 请求超时 (批次{batch_num}, 尝试 {attempt + 1}/{max_retries}): {e}, {delay}s 后重试...")
+                        time.sleep(delay)
+                    else:
+                        all_errors.append(str(e))
+                except Exception as e:
+                    logger.error(f"BigQuery 插入异常 (批次{batch_num}): {e}")
+                    all_errors.append(str(e))
+                    break
+
+        return all_errors
 
     def _query_with_retry(self, query: str, max_retries: int = 3):
         """
@@ -1327,98 +1339,55 @@ class BigQueryUploader:
                 logger.error(f"查询历史日期 batch_id 失败: {e}")
             return None
 
-        # 今天的数据：优先取整点(00分)的 batch，如果没有就取03分的 batch
+        # 今天的数据：优先取当前小时 HH:00~HH:08 窗口内的 batch
         current_hour = now.hour
 
-        # 1. 先查询整点(00分)的 batch
-        hour_start_00 = f"{stat_date.replace('-', '')}_{current_hour:02d}0000"
-        hour_end_00 = f"{stat_date.replace('-', '')}_{current_hour:02d}0500"  # 00:00-05:00
+        # 1. 查询当前小时 00:00~08:00 窗口的 batch
+        hour_start = f"{stat_date.replace('-', '')}_{current_hour:02d}0000"
+        hour_end = f"{stat_date.replace('-', '')}_{current_hour:02d}0800"
 
-        query_00 = f"""
+        query_current = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
         WHERE stat_date = '{stat_date}'
-          AND batch_id >= '{hour_start_00}'
-          AND batch_id < '{hour_end_00}'
+          AND batch_id >= '{hour_start}'
+          AND batch_id < '{hour_end}'
         """
 
         try:
-            for row in self.client.query(query_00).result():
+            for row in self.client.query(query_current).result():
                 if row.latest_batch_id:
-                    logger.debug(f"找到整点(00分) batch: {row.latest_batch_id}")
+                    logger.debug(f"找到当前小时 batch: {row.latest_batch_id}")
                     return row.latest_batch_id
         except Exception as e:
-            logger.error(f"查询整点 batch_id 失败: {e}")
+            logger.error(f"查询当前小时 batch_id 失败: {e}")
 
-        # 2. 整点没有数据，查询03分的 batch
-        hour_start_03 = f"{stat_date.replace('-', '')}_{current_hour:02d}0300"
-        hour_end_03 = f"{stat_date.replace('-', '')}_{current_hour:02d}0800"  # 03:00-08:00
-
-        query_03 = f"""
-        SELECT MAX(batch_id) as latest_batch_id
-        FROM `{table_ref}`
-        WHERE stat_date = '{stat_date}'
-          AND batch_id >= '{hour_start_03}'
-          AND batch_id < '{hour_end_03}'
-        """
-
-        try:
-            for row in self.client.query(query_03).result():
-                if row.latest_batch_id:
-                    logger.debug(f"找到03分 batch: {row.latest_batch_id}")
-                    return row.latest_batch_id
-        except Exception as e:
-            logger.error(f"查询03分 batch_id 失败: {e}")
-
-        # 当前小时没有数据，查找上一小时的数据（优先整点，其次03分）
+        # 2. 当前小时没有数据，查找上一小时 HH:00~HH:08 窗口
         prev_hour = (current_hour - 1) % 24
-        # 跨天处理：如果当前是0点，上一小时是昨天23点
         if current_hour == 0:
             from datetime import timedelta
-            yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
-            prev_stat_date = yesterday
+            prev_stat_date = (now - timedelta(days=1)).strftime('%Y-%m-%d')
         else:
             prev_stat_date = stat_date
 
-        # 3. 查询上一小时整点(00分)的 batch
-        prev_hour_start_00 = f"{prev_stat_date.replace('-', '')}_{prev_hour:02d}0000"
-        prev_hour_end_00 = f"{prev_stat_date.replace('-', '')}_{prev_hour:02d}0100"
+        prev_start = f"{prev_stat_date.replace('-', '')}_{prev_hour:02d}0000"
+        prev_end = f"{prev_stat_date.replace('-', '')}_{prev_hour:02d}0800"
 
-        query_prev_00 = f"""
+        query_prev = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
         WHERE stat_date = '{prev_stat_date}'
-          AND batch_id >= '{prev_hour_start_00}'
-          AND batch_id < '{prev_hour_end_00}'
+          AND batch_id >= '{prev_start}'
+          AND batch_id < '{prev_end}'
         """
 
         try:
-            for row in self.client.query(query_prev_00).result():
+            for row in self.client.query(query_prev).result():
                 if row.latest_batch_id:
-                    logger.debug(f"找到上一小时整点 batch: {row.latest_batch_id}")
+                    logger.debug(f"找到上一小时 batch: {row.latest_batch_id}")
                     return row.latest_batch_id
         except Exception as e:
-            logger.error(f"查询上一小时整点 batch_id 失败: {e}")
-
-        # 4. 查询上一小时03分的 batch
-        prev_hour_start_03 = f"{prev_stat_date.replace('-', '')}_{prev_hour:02d}0300"
-        prev_hour_end_03 = f"{prev_stat_date.replace('-', '')}_{prev_hour:02d}0400"
-
-        query_prev_03 = f"""
-        SELECT MAX(batch_id) as latest_batch_id
-        FROM `{table_ref}`
-        WHERE stat_date = '{prev_stat_date}'
-          AND batch_id >= '{prev_hour_start_03}'
-          AND batch_id < '{prev_hour_end_03}'
-        """
-
-        try:
-            for row in self.client.query(query_prev_03).result():
-                if row.latest_batch_id:
-                    logger.debug(f"找到上一小时03分 batch: {row.latest_batch_id}")
-                    return row.latest_batch_id
-        except Exception as e:
-            logger.error(f"查询上一小时03分 batch_id 失败: {e}")
+            logger.error(f"查询上一小时 batch_id 失败: {e}")
 
         # 5. 回退：直接取当日最新的 batch_id（支持 XMP 内部 API 等非整点数据源）
         query_fallback = f"""
