@@ -63,8 +63,8 @@ OPTIMIZER_USER_MAP: Dict[str, str] = {
 }
 
 # 团队分组配置
-CN_TEAM = ["hannibal", "kino", "zane", "silas", "kimi", "echo", "felix"]
-KR_TEAM = ["lyla", "juria", "jade"]
+CN_TEAM = ["kimi", "silas", "zane", "kino", "hannibal", "bigzo", "echo", "felix", "jocelyn", "ponyo", "lulu", "alvin", "troy", "kendon"]
+KR_TEAM = ["juria", "jade", "lyla", "joy", "heida", "john", "robin"]
 
 def get_optimizer_team(optimizer_name: str) -> str:
     """获取投手所属团队"""
@@ -1693,13 +1693,13 @@ class LarkBot:
         # CN 团队
         if cn_optimizers:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "🇨🇳 **CN团队**"}})
-            for i, opt in enumerate(cn_optimizers[:7]):
+            for i, opt in enumerate(cn_optimizers[:14]):
                 self._add_optimizer_row(elements, i, opt, roas_green, roas_yellow)
 
         # KR 团队
         if kr_optimizers:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "🇰🇷 **KR团队**"}})
-            for i, opt in enumerate(kr_optimizers[:5]):
+            for i, opt in enumerate(kr_optimizers[:7]):
                 self._add_optimizer_row(elements, i, opt, roas_green, roas_yellow)
 
         elements.append({"tag": "hr"})

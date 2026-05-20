@@ -78,7 +78,7 @@ TOKEN_REFRESH_BEFORE_DAYS = 3
 # 投手名单 (英文名用于匹配 campaign_name 中的 optimizer-xxx)
 # 注: lyla, juria, jade 是韩国人不统计; eason 是剪辑师不是投手
 OPTIMIZER_LIST = [
-    "echo", "felix", "hannibal", "kimi", "kino", "silas", "zane"
+    "kimi", "silas", "zane", "kino", "hannibal", "bigzo", "echo", "felix", "jocelyn", "ponyo", "lulu", "alvin", "troy", "kendon"
 ]
 
 # 剪辑师名单 (中文名 -> 可能的别名/英文名/姓氏)
@@ -232,60 +232,82 @@ class XMPBaseScraper:
         print("[XMP] 启动浏览器登录...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=headless)
-            context = await browser.new_context(viewport={'width': 1920, 'height': 1080})
-            if os.path.exists(XMP_COOKIES_FILE):
-                try:
-                    with open(XMP_COOKIES_FILE, 'r') as f:
-                        await context.add_cookies(json.load(f))
-                except:
-                    pass
-            page = await context.new_page()
-            captured_token = None
-
-            async def capture_request(request):
-                nonlocal captured_token
-                auth = request.headers.get('authorization', '')
-                if auth.startswith('Bearer ') and not captured_token:
-                    captured_token = auth
-                    print(f"[XMP] 捕获到 Token")
-
-            page.on('request', capture_request)
             try:
-                await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
-            except:
-                pass
-            await asyncio.sleep(3)
+                context = await browser.new_context(viewport={'width': 1920, 'height': 1080})
+                if os.path.exists(XMP_COOKIES_FILE):
+                    try:
+                        with open(XMP_COOKIES_FILE, 'r') as f:
+                            await context.add_cookies(json.load(f))
+                    except Exception as e:
+                        print(f"[XMP] 加载 cookies 失败，将继续走登录流程: {e}")
+                page = await context.new_page()
+                captured_token = None
 
-            if 'login' in page.url.lower():
-                print("[XMP] 需要登录...")
+                async def capture_request(request):
+                    nonlocal captured_token
+                    auth = request.headers.get('authorization', '')
+                    if auth.startswith('Bearer ') and not captured_token:
+                        captured_token = auth
+                        print(f"[XMP] 捕获到 Token")
+
+                page.on('request', capture_request)
                 try:
-                    await page.wait_for_selector('input[type="password"]', timeout=10000)
-                except:
-                    pass
-                await page.locator('input[type="text"]').first.fill(XMP_USERNAME)
-                await page.locator('input[type="password"]').first.fill(XMP_PASSWORD)
+                    await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
+                except Exception as e:
+                    print(f"[XMP] 打开 XMP 账号页面失败，尝试继续检查当前页面状态: {e}")
+                await asyncio.sleep(3)
+
+                if 'login' in page.url.lower():
+                    print("[XMP] 需要登录...")
+                    max_login_retries = 3
+                    for attempt in range(1, max_login_retries + 1):
+                        try:
+                            if attempt > 1:
+                                await asyncio.sleep(1)
+                                await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
+                            try:
+                                await page.wait_for_selector('input[type="password"]', timeout=10000)
+                            except Exception as e:
+                                print(f"[XMP] 等待登录表单超时或失败，继续尝试填写: {e}")
+                            await page.locator('input[type="text"]').first.fill(XMP_USERNAME)
+                            await page.locator('input[type="password"]').first.fill(XMP_PASSWORD)
+                            try:
+                                await page.click('button:has-text("登录")', timeout=5000)
+                            except Exception as e:
+                                print(f"[XMP] 点击登录按钮失败，尝试回车提交: {e}")
+                                await page.locator('input[type="password"]').first.press('Enter')
+                            await asyncio.sleep(5)
+                            await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
+                            if 'login' not in page.url.lower():
+                                break
+                            raise RuntimeError(f"登录后仍停留在登录页: {page.url}")
+                        except Exception as e:
+                            print(f"[XMP] 登录 XMP 失败, 重试 ({attempt}/{max_login_retries}): {e}")
+                            if attempt == max_login_retries:
+                                return None
+
+                await asyncio.sleep(8)
+                if not captured_token:
+                    try:
+                        await page.reload(wait_until='domcontentloaded')
+                        await asyncio.sleep(5)
+                    except Exception as e:
+                        print(f"[XMP] 刷新页面以捕获 Token 失败: {e}")
+
                 try:
-                    await page.click('button:has-text("登录")', timeout=5000)
-                except:
-                    await page.locator('input[type="password"]').first.press('Enter')
-                await asyncio.sleep(5)
-                await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
+                    cookies = await context.cookies()
+                    with open(XMP_COOKIES_FILE, 'w') as f:
+                        json.dump(cookies, f)
+                except Exception as e:
+                    print(f"[XMP] 保存 cookies 失败: {e}")
 
-            await asyncio.sleep(8)
-            if not captured_token:
-                await page.reload(wait_until='domcontentloaded')
-                await asyncio.sleep(5)
+                if captured_token:
+                    self._save_token(captured_token)
+                    self.bearer_token = captured_token
 
-            cookies = await context.cookies()
-            with open(XMP_COOKIES_FILE, 'w') as f:
-                json.dump(cookies, f)
-
-            if captured_token:
-                self._save_token(captured_token)
-                self.bearer_token = captured_token
-
-            await browser.close()
-            return captured_token
+                return captured_token
+            finally:
+                await browser.close()
 
 # 支持的渠道及其收入字段
 CHANNEL_CONFIG = {
@@ -441,7 +463,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
                         'date': start_date,
                     })
 
-                print(f"  第 {page} 页: {len(campaigns)} 条")
+                print(f" {channel} 第 {page} 页: {len(campaigns)} 条")
 
                 if len(campaigns) < page_size:
                     break
