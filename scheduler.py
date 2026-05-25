@@ -4,6 +4,7 @@
 支持：
 - 每日 09:00 日报播报 (Daily Report)
 - 每日 9:00-24:00 整点实时播报 (Real-time Report)
+- 测试部署
 """
 
 import os
