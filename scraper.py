@@ -36,6 +36,7 @@ class XMPScraper:
         self.password = password
         self.headless = headless
         self.cookie_file = cookie_file
+        self.playwright = None
         self.browser: Browser = None
         self.page: Page = None
 
