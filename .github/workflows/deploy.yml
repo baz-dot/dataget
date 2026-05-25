@@ -19,7 +19,7 @@ env:
   PROJECT_ID: fleet-blend-469520-n7
   QUICKBI_REGION: asia-northeast3
   SCHEDULER_REGION: asia-northeast1
-  SERVICE_ACCOUNT: lanfp-server@aigc-workflow.iam.gserviceaccount.com
+  SERVICE_ACCOUNT: xmp-data-scraper@fleet-blend-469520-n7.iam.gserviceaccount.com
 
 jobs:
   # ============================================================
