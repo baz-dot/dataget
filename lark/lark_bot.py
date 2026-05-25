@@ -63,8 +63,8 @@ OPTIMIZER_USER_MAP: Dict[str, str] = {
 }
 
 # 团队分组配置
-CN_TEAM = ["hannibal", "kino", "zane", "silas", "kimi", "echo", "felix"]
-KR_TEAM = ["lyla", "juria", "jade"]
+CN_TEAM = ["kimi", "silas", "zane", "kino", "hannibal", "bigzo", "echo", "felix", "jocelyn", "ponyo", "lulu", "alvin", "troy", "kendon"]
+KR_TEAM = ["juria", "jade", "lyla", "joy", "heida", "john", "robin"]
 
 def get_optimizer_team(optimizer_name: str) -> str:
     """获取投手所属团队"""
@@ -1693,13 +1693,13 @@ class LarkBot:
         # CN 团队
         if cn_optimizers:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "🇨🇳 **CN团队**"}})
-            for i, opt in enumerate(cn_optimizers[:7]):
+            for i, opt in enumerate(cn_optimizers[:14]):
                 self._add_optimizer_row(elements, i, opt, roas_green, roas_yellow)
 
         # KR 团队
         if kr_optimizers:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "🇰🇷 **KR团队**"}})
-            for i, opt in enumerate(kr_optimizers[:5]):
+            for i, opt in enumerate(kr_optimizers[:7]):
                 self._add_optimizer_row(elements, i, opt, roas_green, roas_yellow)
 
         elements.append({"tag": "hr"})
@@ -1973,6 +1973,8 @@ class LarkBot:
                 - country_marginal_roas: [{country, spend, roas}]
             prev_data: 上一小时快照数据，用于计算环比
         """
+        from config.roas_thresholds import evaluate_realtime_roas_green_status
+
         current_hour = data.get("current_hour", time.strftime("%H:%M"))
         summary = data.get("summary", {})
         data_delayed = data.get("data_delayed", False)
@@ -2040,6 +2042,34 @@ class LarkBot:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🔴 大盘预警：当前 ROAS {media_roas:.1%} (低于基线 {roas_baseline:.0%})**"}})
         else:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🟢 大盘健康：当前 ROAS {media_roas:.1%}**"}})
+        elements.append({"tag": "hr"})
+        #新加标准模块：TikTok全区30%，meta整体要求是40%， meta具体到韩区45% 其他区40%
+        green_status = evaluate_realtime_roas_green_status(
+            summary, channel_benchmark, data.get("meta_country_benchmark", {}),
+        )
+        if green_status["is_green"]:
+            #分渠道区域
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🟢 分渠道区域健康**"}})
+        else:
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🔴 分渠道区域预警 **"}})
+
+        checks = green_status.get("checks", [])
+        if checks:
+            for check in checks:
+                status_icon = "✅" if check.get("passed") else "❌"
+                name = check.get("name", "未知区域")
+                roas = check.get("roas", 0)
+                threshold = check.get("threshold", 0)
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"{status_icon} {name}：ROAS **{roas:.1%}** / 标准 {threshold:.1%}"
+                    }
+                })
+        else:
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "暂无分渠道区域数据"}})
+
         elements.append({"tag": "hr"})
 
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**⏰ 实时战报**"}})

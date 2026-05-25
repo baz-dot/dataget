@@ -1897,7 +1897,8 @@ class BigQueryUploader:
             "scale_up_campaigns": [],
             "country_marginal_roas": [],
             "region_opportunity_radar": [],  # 地区机会雷达
-            "channel_benchmark": {}  # 分渠道大盘 ROAS
+            "channel_benchmark": {},  # 分渠道大盘 ROAS
+            "meta_country_benchmark":{}  # meta分国家（韩区\其他区）
         }
 
         if not batch_id:
@@ -2104,6 +2105,23 @@ class BigQueryUploader:
           AND drama_name IS NOT NULL
         GROUP BY country, drama_name
         ORDER BY country, spend DESC
+        """
+        #5.3 meta分国家
+        meta_country_benchmark_query=f"""
+        SELECT
+            CASE
+                WHEN UPPER(country) IN ('KR', 'KOR', 'KOREA', 'SOUTH KOREA') THEN 'KR'
+                ELSE 'OTHER'
+            END as region_group,
+            SUM(spend) as spend,
+            SUM(media_user_revenue) as revenue,
+            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+        FROM `{table_ref}`
+        WHERE stat_date = '{today}' {batch_filter}
+          AND LOWER(channel) IN ('meta', 'facebook', 'fb')
+          AND country IS NOT NULL
+          AND country != ''
+        GROUP BY region_group
         """
 
         # 6. 前一日同时刻数据 (用于日环比)
@@ -2397,6 +2415,13 @@ class BigQueryUploader:
                     "spend": float(row.spend or 0),
                     "revenue": float(row.revenue or 0),
                     "roas": float(row.roas or 0)
+                }
+            # meta分国家
+            for row in self.client.query(meta_country_benchmark_query).result():
+                result["meta_country_benchmark"][row.region_group] = {
+                    "spend": float(row.spend or 0),
+                    "revenue": float(row.revenue or 0),
+                    "roas": float(row.roas or 0),
                 }
 
             # 5.2 地区机会雷达 - 获取每个国家的核心驱动剧集
