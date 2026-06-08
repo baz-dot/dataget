@@ -1303,6 +1303,16 @@ class BigQueryUploader:
             logger.error(f"查询同日 batch_id 失败: {e}")
         return None
 
+    def _get_quickbi_bi_batch_filter(self, stat_date: str) -> Optional[tuple]:
+        """获取 BI 对照列使用的 QuickBI 表引用和 batch 过滤条件。"""
+        quickbi_table_ref = f"{self.project_id}.quickbi_data.quickbi_campaigns"
+        batch_id = self._get_latest_batch_id(quickbi_table_ref, stat_date)
+        if not batch_id:
+            logger.warning(f"QuickBI未找到 {stat_date} 的数据")
+            return None
+        batch_filter = f"AND batch_id = '{batch_id}'"
+        return quickbi_table_ref, batch_filter
+
     def _get_latest_batch_id(self, table_ref: str, stat_date: str) -> str:
         """
         获取指定日期的最新 batch_id
@@ -1905,6 +1915,7 @@ class BigQueryUploader:
             logger.warning(f"未找到 {today} 的数据")
             return result
 
+        quickbi_bi_batch = self._get_quickbi_bi_batch_filter(today)
         # 解析 batch_id 获取 API 更新时间 (格式: 20251222_103000)
         try:
             batch_time_str = batch_id.replace('_', '')
@@ -1995,6 +2006,37 @@ class BigQueryUploader:
         GROUP BY optimizer, channel
         ORDER BY optimizer, spend DESC
         """
+
+        # 2.3 QuickBI 固定口径投手分渠道数据 (BI 对照列)
+        optimizer_bi_channel_query = None
+        optimizer_bi_total_query = None
+        if quickbi_bi_batch:
+            quickbi_table_ref, quickbi_batch_filter = quickbi_bi_batch
+            optimizer_bi_channel_query = f"""
+            SELECT
+                optimizer,
+                channel,
+                SUM(spend) as spend,
+                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            FROM `{quickbi_table_ref}`
+            WHERE stat_date = '{today}' {quickbi_batch_filter}
+              AND optimizer IS NOT NULL
+              AND optimizer != ''
+              AND channel IS NOT NULL
+            GROUP BY optimizer, channel
+            ORDER BY optimizer, spend DESC
+            """
+
+            optimizer_bi_total_query = f"""
+            SELECT
+                optimizer,
+                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            FROM `{quickbi_table_ref}`
+            WHERE stat_date = '{today}' {quickbi_batch_filter}
+              AND optimizer IS NOT NULL
+              AND optimizer != ''
+            GROUP BY optimizer
+            """
 
         # 3. 止损预警 (Spend > $300 且 ROAS < 30%) - 按 campaign 整体聚合
         stop_loss_query = f"""
@@ -2226,17 +2268,19 @@ class BigQueryUploader:
                         SUM(media_user_revenue) as total_media_revenue,
                         SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
                     FROM `{table_ref}`
-                    WHERE stat_date = '{today}' AND batch_id = '{prev_batch_id}'
+                    WHERE stat_date = '{prev_hour_stat_date}' AND batch_id = '{prev_batch_id}'
                     """
 
                     prev_hour_optimizer_query = f"""
                     SELECT
                         optimizer,
+                        channel,
                         SUM(spend) as spend
                     FROM `{table_ref}`
-                    WHERE stat_date = '{today}' AND batch_id = '{prev_batch_id}'
+                    WHERE stat_date = '{prev_hour_stat_date}' AND batch_id = '{prev_batch_id}'
                       AND optimizer IS NOT NULL AND optimizer != ''
-                    GROUP BY optimizer
+                      AND channel IS NOT NULL
+                    GROUP BY optimizer, channel
                     """
             except Exception as e:
                 logger.error(f"查询上一小时 batch_id 失败: {e}")
@@ -2322,6 +2366,30 @@ class BigQueryUploader:
             for opt_data in result["optimizer_spend"]:
                 opt_name = opt_data["optimizer"]
                 opt_data["channel_spend"] = optimizer_channels.get(opt_name, {})
+
+            # 2.3 获取 QuickBI 固定口径的 BI 对照列
+            optimizer_bi_channels = {}
+            optimizer_bi_roas = {}
+            if optimizer_bi_channel_query and optimizer_bi_total_query:
+                try:
+                    for row in self.client.query(optimizer_bi_channel_query).result():
+                        opt = row.optimizer
+                        if opt not in optimizer_bi_channels:
+                            optimizer_bi_channels[opt] = {}
+                        optimizer_bi_channels[opt][row.channel] = {
+                            "spend": float(row.spend or 0),
+                            "roas": float(row.roas or 0)
+                        }
+
+                    for row in self.client.query(optimizer_bi_total_query).result():
+                        optimizer_bi_roas[row.optimizer] = float(row.roas or 0)
+                except Exception as e:
+                    logger.warning(f"查询 QuickBI 投手 BI 对照数据失败: {e}")
+
+            for opt_data in result["optimizer_spend"]:
+                opt_name = opt_data["optimizer"]
+                opt_data["bi_channel_spend"] = optimizer_bi_channels.get(opt_name, {})
+                opt_data["bi_roas"] = optimizer_bi_roas.get(opt_name, 0)
 
             # 3. 止损预警
             for row in self.client.query(stop_loss_query).result():
@@ -2482,12 +2550,21 @@ class BigQueryUploader:
 
             # 7.1 上一小时分投手数据
             if prev_hour_optimizer_query:
-                optimizer_data = []
+                optimizer_map = {}
                 for row in self.client.query(prev_hour_optimizer_query).result():
-                    optimizer_data.append({
-                        "optimizer": row.optimizer,
-                        "spend": float(row.spend or 0)
-                    })
+                    opt = row.optimizer
+                    spend = float(row.spend or 0)
+                    if opt not in optimizer_map:
+                        optimizer_map[opt] = {
+                            "optimizer": opt,
+                            "spend": 0,
+                            "channel_spend": {}
+                        }
+                    optimizer_map[opt]["spend"] += spend
+                    optimizer_map[opt]["channel_spend"][row.channel] = {
+                        "spend": spend
+                    }
+                optimizer_data = list(optimizer_map.values())
                 result["prev_hour_summary"]["optimizer_data"] = optimizer_data
 
             return result

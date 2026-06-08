@@ -149,6 +149,32 @@ def safe_get_number(data: dict, key: str, default: float = 0) -> float:
         return default
 
 
+def _get_channel_data(channel_spend: Dict[str, Any], aliases: List[str]) -> Dict[str, Any]:
+    """Return the first channel dict matching any alias, case-insensitively."""
+    if not channel_spend:
+        return {}
+
+    aliases_lower = {alias.lower() for alias in aliases}
+    for key, value in channel_spend.items():
+        if str(key).lower() in aliases_lower and isinstance(value, dict):
+            return value
+    return {}
+
+
+def _format_spend_roas(data: Dict[str, Any]) -> str:
+    spend = safe_get_number(data, "spend")
+    if spend <= 0:
+        return "-"
+    roas = safe_get_number(data, "roas")
+    return f"${spend:,.0f}({roas:.0%})"
+
+
+def _format_delta(value: Optional[float], can_calculate: bool) -> str:
+    if value is None or not can_calculate:
+        return "-"
+    return f"${value:,.0f}"
+
+
 class LarkBot:
     """飞书机器人播报类"""
 
@@ -2185,13 +2211,14 @@ class LarkBot:
         if not prev_opt_data and prev_data and prev_data.get("optimizer_data"):
             prev_opt_data = prev_data.get("optimizer_data", [])
         for opt in prev_opt_data:
-            prev_optimizer_map[opt.get("optimizer")] = opt.get("spend", 0)
+            prev_optimizer_map[opt.get("optimizer")] = opt
 
         optimizer_deltas = []
         for opt in optimizer_spend:
             optimizer_name = opt.get("optimizer", "未知")
             current_spend = opt.get("spend", 0)
-            prev_spend = prev_optimizer_map.get(optimizer_name, 0)
+            prev_opt = prev_optimizer_map.get(optimizer_name, {})
+            prev_spend = prev_opt.get("spend", 0) if isinstance(prev_opt, dict) else 0
             delta = current_spend - prev_spend
 
             # 获取主力计划 (包含 drama 和 country)
@@ -2214,7 +2241,10 @@ class LarkBot:
                 "total": current_spend,
                 "roas": opt.get("roas", 0),
                 "top_campaigns": top_camp_info,
-                "channel_spend": opt.get("channel_spend", {})
+                "channel_spend": opt.get("channel_spend", {}),
+                "prev_channel_spend": prev_opt.get("channel_spend", {}) if isinstance(prev_opt, dict) else {},
+                "bi_channel_spend": opt.get("bi_channel_spend", {}),
+                "bi_roas": opt.get("bi_roas", 0),
             })
 
         # 按增量排序
@@ -2231,20 +2261,36 @@ class LarkBot:
 
             # 分渠道消耗
             channel_spend = opt.get("channel_spend", {})
-            tiktok_data = channel_spend.get("TikTok", {}) or channel_spend.get("tiktok", {})
-            meta_data = channel_spend.get("Meta", {}) or channel_spend.get("meta", {}) or channel_spend.get("facebook", {})
+            prev_channel_spend = opt.get("prev_channel_spend", {})
+            tiktok_data = _get_channel_data(channel_spend, ["TikTok", "tiktok", "tt"])
+            meta_data = _get_channel_data(channel_spend, ["Meta", "meta", "facebook", "fb"])
+            prev_tiktok_data = _get_channel_data(prev_channel_spend, ["TikTok", "tiktok", "tt"])
+            prev_meta_data = _get_channel_data(prev_channel_spend, ["Meta", "meta", "facebook", "fb"])
             tiktok_spend = tiktok_data.get("spend", 0)
             tiktok_roas = tiktok_data.get("roas", 0)
             meta_spend = meta_data.get("spend", 0)
             meta_roas = meta_data.get("roas", 0)
+            has_prev_optimizer_data = bool(prev_optimizer_map)
+            can_calculate_channel_delta = not has_prev_optimizer_data or bool(prev_channel_spend)
+            tiktok_delta = tiktok_spend - prev_tiktok_data.get("spend", 0)
+            meta_delta = meta_spend - prev_meta_data.get("spend", 0)
+
+            bi_channel_spend = opt.get("bi_channel_spend", {})
+            tiktok_bi = _get_channel_data(bi_channel_spend, ["TikTok", "tiktok", "tt"])
+            meta_bi = _get_channel_data(bi_channel_spend, ["Meta", "meta", "facebook", "fb"])
+            bi_roas_val = opt.get("bi_roas", 0)
 
             optimizer_rows.append({
                 "optimizer": opt['name'],
-                "delta": f"${delta:,.0f}",
+                "tiktok_delta": _format_delta(tiktok_delta, can_calculate_channel_delta),
+                "meta_delta": _format_delta(meta_delta, can_calculate_channel_delta),
                 "total": f"${opt['total']:,.0f}",
                 "tiktok": f"${tiktok_spend:,.0f}({tiktok_roas:.0%})" if tiktok_spend > 0 else "-",
                 "meta": f"${meta_spend:,.0f}({meta_roas:.0%})" if meta_spend > 0 else "-",
                 "media_roas": roas_str,
+                "tiktok_bi": _format_spend_roas(tiktok_bi),
+                "meta_bi": _format_spend_roas(meta_bi),
+                "roas_bi": f"{bi_roas_val:.1%}" if bi_roas_val else "-",
                 "status": status
             })
 
@@ -2254,11 +2300,15 @@ class LarkBot:
                 "page_size": 20,
                 "columns": [
                     {"name": "optimizer", "display_name": "投手"},
-                    {"name": "delta", "display_name": "新增"},
+                    {"name": "tiktok_delta", "display_name": "TikTok 新增"},
+                    {"name": "meta_delta", "display_name": "Meta 新增"},
                     {"name": "total", "display_name": "累计"},
                     {"name": "tiktok", "display_name": "TikTok"},
                     {"name": "meta", "display_name": "Meta"},
                     {"name": "media_roas", "display_name": "ROAS"},
+                    {"name": "tiktok_bi", "display_name": "TikTok (BI)"},
+                    {"name": "meta_bi", "display_name": "Meta (BI)"},
+                    {"name": "roas_bi", "display_name": "ROAS (BI)"},
                     {"name": "status", "display_name": "状态"}
                 ],
                 "rows": optimizer_rows
