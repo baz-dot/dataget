@@ -2017,7 +2017,7 @@ class BigQueryUploader:
                 optimizer,
                 channel,
                 SUM(spend) as spend,
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+                SAFE_DIVIDE(SUM(new_user_revenue), SUM(spend)) as roas
             FROM `{quickbi_table_ref}`
             WHERE stat_date = '{today}' {quickbi_batch_filter}
               AND optimizer IS NOT NULL
@@ -2030,7 +2030,7 @@ class BigQueryUploader:
             optimizer_bi_total_query = f"""
             SELECT
                 optimizer,
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+                SAFE_DIVIDE(SUM(new_user_revenue), SUM(spend)) as roas
             FROM `{quickbi_table_ref}`
             WHERE stat_date = '{today}' {quickbi_batch_filter}
               AND optimizer IS NOT NULL

@@ -2288,9 +2288,9 @@ class LarkBot:
                 "tiktok": f"${tiktok_spend:,.0f}({tiktok_roas:.0%})" if tiktok_spend > 0 else "-",
                 "meta": f"${meta_spend:,.0f}({meta_roas:.0%})" if meta_spend > 0 else "-",
                 "media_roas": roas_str,
-                "tiktok_bi": _format_spend_roas(tiktok_bi),
-                "meta_bi": _format_spend_roas(meta_bi),
-                "roas_bi": f"{bi_roas_val:.1%}" if bi_roas_val else "-",
+                # "tiktok_bi": _format_spend_roas(tiktok_bi),
+                # "meta_bi": _format_spend_roas(meta_bi),
+                # "roas_bi": f"{bi_roas_val:.1%}" if bi_roas_val else "-",
                 "status": status
             })
 
@@ -2306,9 +2306,9 @@ class LarkBot:
                     {"name": "tiktok", "display_name": "TikTok"},
                     {"name": "meta", "display_name": "Meta"},
                     {"name": "media_roas", "display_name": "ROAS"},
-                    {"name": "tiktok_bi", "display_name": "TikTok (BI)"},
-                    {"name": "meta_bi", "display_name": "Meta (BI)"},
-                    {"name": "roas_bi", "display_name": "ROAS (BI)"},
+                    # {"name": "tiktok_bi", "display_name": "TikTok (BI)"},
+                    # {"name": "meta_bi", "display_name": "Meta (BI)"},
+                    # {"name": "roas_bi", "display_name": "ROAS (BI)"},
                     {"name": "status", "display_name": "状态"}
                 ],
                 "rows": optimizer_rows
