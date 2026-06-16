@@ -2396,6 +2396,7 @@ class LarkBot:
             stop_loss_rows = []
             for camp in stop_loss_campaigns[:5]:
                 stop_loss_rows.append({
+                    "campaign_id":camp.get("campaign_id", ""),
                     "optimizer": camp.get("optimizer", "未知"),
                     "drama": camp.get("drama_name", "-"),
                     "channel": camp.get("channel", "-"),
@@ -2406,9 +2407,10 @@ class LarkBot:
             elements.append({
                 "tag": "table",
                 "columns": [
-                    {"name": "optimizer", "display_name": "投手"},
+                    {"name": "campaign_id", "display_name": "Campaign ID", "width": "160px"},
+                    {"name": "optimizer", "display_name": "投手", "width": "80px"},
                     {"name": "drama", "display_name": "剧集"},
-                    {"name": "channel", "display_name": "渠道"},
+                    {"name": "channel", "display_name": "渠道", "width": "80px"},
                     {"name": "spend", "display_name": "消耗"},
                     {"name": "roas", "display_name": "ROAS"},
                     {"name": "action", "display_name": "建议"}
