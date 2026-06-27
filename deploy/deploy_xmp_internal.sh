@@ -42,9 +42,9 @@ gcloud run jobs create ${JOB_NAME} \
     --image ${IMAGE_NAME} \
     --region ${REGION} \
     --service-account ${SERVICE_ACCOUNT} \
-    --memory 1Gi \
-    --cpu 1 \
-    --task-timeout 20m \
+    --memory 2Gi \
+    --cpu 2 \
+    --task-timeout 60m \
     --max-retries 2 \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
     --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
@@ -57,9 +57,9 @@ gcloud run jobs create ${JOB_NAME} \
 gcloud run jobs update ${JOB_NAME} \
     --image ${IMAGE_NAME} \
     --region ${REGION} \
-    --memory 1Gi \
-    --cpu 1 \
-    --task-timeout 20m \
+    --memory 2Gi \
+    --cpu 2 \
+    --task-timeout 60m \
     --max-retries 2 \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
     --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
@@ -97,9 +97,9 @@ gcloud run jobs create ${DAILY_JOB_NAME} \
     --image ${IMAGE_NAME} \
     --region ${REGION} \
     --service-account ${SERVICE_ACCOUNT} \
-    --memory 1Gi \
-    --cpu 1 \
-    --task-timeout 20m \
+    --memory 2Gi \
+    --cpu 2 \
+    --task-timeout 60m \
     --max-retries 2 \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
     --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
@@ -113,9 +113,9 @@ gcloud run jobs create ${DAILY_JOB_NAME} \
 gcloud run jobs update ${DAILY_JOB_NAME} \
     --image ${IMAGE_NAME} \
     --region ${REGION} \
-    --memory 1Gi \
-    --cpu 1 \
-    --task-timeout 20m \
+    --memory 2Gi \
+    --cpu 2 \
+    --task-timeout 60m \
     --max-retries 2 \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
     --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
