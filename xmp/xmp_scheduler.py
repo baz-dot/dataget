@@ -153,6 +153,51 @@ def safe_int(val) -> int:
         return 0
 
 
+LOGIN_SUBMIT_SELECTORS = [
+    'button:has-text("登录")',
+    'button:has-text("Log in")',
+    'button:has-text("Login")',
+    'button:has-text("Sign in")',
+    'button[type="submit"]',
+    '[type="submit"]',
+    '.ant-btn-primary',
+    '.arco-btn-primary',
+    '.semi-button-primary',
+]
+
+
+async def click_login_submit(page) -> bool:
+    """Click the XMP login submit control, falling back to Enter."""
+    last_error = None
+    for selector in LOGIN_SUBMIT_SELECTORS:
+        try:
+            await page.locator(selector).first.click(timeout=3000)
+            return True
+        except Exception as e:
+            last_error = e
+
+    if last_error:
+        print(f"[XMP] 点击登录按钮失败，尝试回车提交: {last_error}")
+    await page.locator('input[type="password"]').first.press('Enter')
+    return False
+
+
+async def describe_login_page(page) -> str:
+    """Return compact diagnostics for a login page that did not redirect."""
+    try:
+        title = await page.title()
+    except Exception as e:
+        title = f"<title failed: {e}>"
+
+    try:
+        button_texts = await page.locator("button").all_inner_texts()
+        visible_buttons = [text.strip() for text in button_texts if text.strip()]
+    except Exception as e:
+        visible_buttons = [f"<buttons failed: {e}>"]
+
+    return f"url={page.url}, title={title}, buttons={visible_buttons[:8]}"
+
+
 def send_lark_alert(title: str, content: str, level: str = "warning"):
     """发送飞书告警通知"""
     if not LARK_ALERT_WEBHOOK:
@@ -187,6 +232,7 @@ class XMPBaseScraper:
     def __init__(self):
         self.bearer_token = None
         self.token_updated_at = None
+        self._token_refresh_lock = None
         self._load_token()
 
     def _load_token(self) -> bool:
@@ -225,6 +271,27 @@ class XMPBaseScraper:
             print(f"[XMP] Token 已保存")
         except Exception as e:
             print(f"[XMP] 保存 Token 失败: {e}")
+
+    async def ensure_token(self, headless: bool = True) -> Optional[str]:
+        """Ensure a valid token exists, serializing browser login per scraper."""
+        if self.bearer_token and not self._should_refresh_token():
+            return self.bearer_token
+
+        lock = getattr(self, "_token_refresh_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._token_refresh_lock = lock
+
+        async with lock:
+            if self.bearer_token and not self._should_refresh_token():
+                return self.bearer_token
+
+            self._load_token()
+            if self.bearer_token and not self._should_refresh_token():
+                return self.bearer_token
+
+            print("[XMP] 需要获取/刷新 Token...")
+            return await self.login_and_get_token(headless=headless)
 
     async def login_and_get_token(self, headless: bool = True) -> Optional[str]:
         """登录 XMP 获取 Token"""
@@ -271,16 +338,15 @@ class XMPBaseScraper:
                                 print(f"[XMP] 等待登录表单超时或失败，继续尝试填写: {e}")
                             await page.locator('input[type="text"]').first.fill(XMP_USERNAME)
                             await page.locator('input[type="password"]').first.fill(XMP_PASSWORD)
-                            try:
-                                await page.click('button:has-text("登录")', timeout=5000)
-                            except Exception as e:
-                                print(f"[XMP] 点击登录按钮失败，尝试回车提交: {e}")
-                                await page.locator('input[type="password"]').first.press('Enter')
-                            await asyncio.sleep(5)
+                            await click_login_submit(page)
+                            for _ in range(10):
+                                await asyncio.sleep(1)
+                                if 'login' not in page.url.lower():
+                                    break
                             await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
                             if 'login' not in page.url.lower():
                                 break
-                            raise RuntimeError(f"登录后仍停留在登录页: {page.url}")
+                            raise RuntimeError(f"登录后仍停留在登录页: {await describe_login_page(page)}")
                         except Exception as e:
                             print(f"[XMP] 登录 XMP 失败, 重试 ({attempt}/{max_login_retries}): {e}")
                             if attempt == max_login_retries:
@@ -364,8 +430,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
 
         # 检查 Token
         if not self.bearer_token or self._should_refresh_token():
-            print("[XMP] 需要获取/刷新 Token..")
-            await self.login_and_get_token()
+            await self.ensure_token()
 
         if not self.bearer_token:
             send_lark_alert("XMP 登录失败", f"无法获取 {channel} 数据", level="error")
@@ -508,8 +573,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
 
         # 检查 Token
         if not self.bearer_token or self._should_refresh_token():
-            print("[XMP] 需要获取/刷新 Token....")
-            await self.login_and_get_token()
+            await self.ensure_token()
 
         if not self.bearer_token:
             send_lark_alert("XMP 登录失败", f"无法获取 {channel} 广告数据", level="error")
@@ -645,8 +709,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         """
         # 检查 Token
         if not self.bearer_token or self._should_refresh_token():
-            print("[XMP] 需要获取/刷新 Token...")
-            await self.login_and_get_token()
+            await self.ensure_token()
 
         if not self.bearer_token:
             send_lark_alert("XMP 登录失败", f"无法获取 {channel} designer 数据", level="error")
@@ -767,7 +830,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
     ) -> Optional[Dict[str, Any]]:
         """获取指定渠道的汇总数据"""
         if not self.bearer_token or self._should_refresh_token():
-            await self.login_and_get_token()
+            await self.ensure_token()
 
         if not self.bearer_token:
             return None
@@ -863,8 +926,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
 
         # 确保 Token 已获取（避免并行时重复登录）
         if not self.bearer_token or self._should_refresh_token():
-            print("[XMP] 需要获取/刷新 Token.....")
-            await self.login_and_get_token()
+            await self.ensure_token()
 
         # 并行拉取所有渠道
         async def _fetch_single_channel(channel):
