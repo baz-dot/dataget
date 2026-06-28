@@ -181,6 +181,30 @@ def send_lark_alert(title: str, content: str, level: str = "warning"):
         return False
 
 
+LOGIN_BUTTON_SELECTORS = (
+    'button:has-text("登录")',
+    'button:has-text("Login")',
+    'button[type="submit"]',
+    '.login button',
+    'button',
+)
+
+
+async def click_login_submit(page) -> bool:
+    """Submit the XMP login form using several stable fallbacks."""
+    last_error = None
+    for selector in LOGIN_BUTTON_SELECTORS:
+        try:
+            await page.locator(selector).first.click(timeout=5000)
+            return True
+        except Exception as e:
+            last_error = e
+
+    print(f"[XMP] Login button click failed, pressing Enter instead: {last_error}")
+    await page.locator('input[type="password"]').first.press('Enter')
+    return False
+
+
 class XMPBaseScraper:
     """XMP 基础抓取器 (Token 管理)"""
 
@@ -271,11 +295,7 @@ class XMPBaseScraper:
                                 print(f"[XMP] 等待登录表单超时或失败，继续尝试填写: {e}")
                             await page.locator('input[type="text"]').first.fill(XMP_USERNAME)
                             await page.locator('input[type="password"]').first.fill(XMP_PASSWORD)
-                            try:
-                                await page.click('button:has-text("登录")', timeout=5000)
-                            except Exception as e:
-                                print(f"[XMP] 点击登录按钮失败，尝试回车提交: {e}")
-                                await page.locator('input[type="password"]').first.press('Enter')
+                            await click_login_submit(page)
                             await asyncio.sleep(5)
                             await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
                             if 'login' not in page.url.lower():
@@ -863,7 +883,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
 
         # 确保 Token 已获取（避免并行时重复登录）
         if not self.bearer_token or self._should_refresh_token():
-            print("[XMP] 需要获取/刷新 Token...")
+            print("[XMP] 需要获取/刷新 Token....")
             await self.login_and_get_token()
 
         # 并行拉取所有渠道
@@ -3377,3 +3397,4 @@ def test_editor_performance():
 
 if __name__ == '__test__':
     test_material_api()
+
