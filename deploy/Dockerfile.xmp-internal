@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir \
     requests \
     python-dotenv \
     google-cloud-bigquery \
+    google-cloud-storage \
     playwright
 
 # 安装 Playwright 浏览器 (用于登录获取 Token)
@@ -18,6 +19,7 @@ RUN playwright install chromium --with-deps
 COPY xmp/ ./xmp/
 COPY config/ ./config/
 COPY bigquery_storage.py .
+COPY gcs_storage.py .
 COPY utils/ ./utils/
 
 ENV PYTHONUNBUFFERED=1

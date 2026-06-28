@@ -16,8 +16,8 @@ BQ_PROJECT_ID="${PROJECT_ID}"
 BQ_DATASET_ID="xmp_data"
 
 # XMP 登录凭据
-XMP_USERNAME="${XMP_USERNAME:-violet@spoonlabs-partners.com}"
-XMP_PASSWORD="${XMP_PASSWORD:-M8NkLc8dyr}"
+XMP_USERNAME="${XMP_USERNAME:-lanfeipeng@aixinhe.com}"
+XMP_PASSWORD="${XMP_PASSWORD:-Lanfeipeng0915}"
 
 # XMP Open API 凭据 (素材报表)
 XMP_CLIENT_ID="3d546dedfe2f3613af0da8202419b937"

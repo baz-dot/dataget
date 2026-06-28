@@ -11,8 +11,8 @@ IMAGE_NAME="gcr.io/${PROJECT_ID}/${JOB_NAME}"
 SERVICE_ACCOUNT="xmp-data-scraper@${PROJECT_ID}.iam.gserviceaccount.com"
 
 # 环境变量（敏感信息）
-XMP_USERNAME="violet@spoonlabs-partners.com"
-XMP_PASSWORD="M8NkLc8dyr"
+XMP_USERNAME="lanfeipeng@aixinhe.com"
+XMP_PASSWORD="Lanfeipeng0915"
 GCS_BUCKET_NAME="xmp_raw_data_storage"
 BQ_PROJECT_ID="${PROJECT_ID}"
 BQ_DATASET_ID="xmp_data"

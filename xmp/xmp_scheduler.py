@@ -1,4 +1,4 @@
-"""
+﻿"""
 XMP 多渠道数据定时抓取脚本
 支持 TikTok 和 Meta (Facebook) 渠道
 
@@ -269,6 +269,7 @@ class XMPBaseScraper:
                                 await page.wait_for_selector('input[type="password"]', timeout=10000)
                             except Exception as e:
                                 print(f"[XMP] 等待登录表单超时或失败，继续尝试填写: {e}")
+                            print(f"XMP_USERNAME:{XMP_USERNAME}  XMP_PASSWORD:{XMP_PASSWORD}")
                             await page.locator('input[type="text"]').first.fill(XMP_USERNAME)
                             await page.locator('input[type="password"]').first.fill(XMP_PASSWORD)
                             try:
@@ -276,7 +277,22 @@ class XMPBaseScraper:
                             except Exception as e:
                                 print(f"[XMP] 点击登录按钮失败，尝试回车提交: {e}")
                                 await page.locator('input[type="password"]').first.press('Enter')
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(10)
+                            if 'login' in page.url.lower():
+                                await asyncio.sleep(10)
+                            if attempt == max_login_retries:
+                                try:
+                                    screenshot_path = "xmp_login_error.png"
+                                    await page.screenshot(path=screenshot_path, full_page=True)
+                                    print("[XMP] 登录失败页面截图已保存: xmp_login_error.png")
+
+                                    from gcs_storage import GCSUploader
+                                    blob_path = "xmp/login_diagnostics/xmp_login_error.png"
+                                    uri = GCSUploader("xmp_raw_data_storage").upload_file(screenshot_path, blob_path)
+                                    print(f"[XMP] 登录失败页面截图已上传: {uri}")
+
+                                except Exception as screenshot_error:
+                                    print(f"[XMP] 保存或上传登录失败截图失败: {screenshot_error}")
                             await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
                             if 'login' not in page.url.lower():
                                 break
