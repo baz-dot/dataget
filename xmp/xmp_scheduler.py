@@ -436,7 +436,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
                             XMP_LIST_URL,
                             json=payload,
                             headers=headers,
-                            timeout=aiohttp.ClientTimeout(total=30)
+                            timeout=aiohttp.ClientTimeout(total=60)
                         ) as response:
                             result = await response.json()
 
