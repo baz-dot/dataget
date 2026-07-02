@@ -1303,6 +1303,30 @@ class BigQueryUploader:
             logger.error(f"查询同日 batch_id 失败: {e}")
         return None
 
+    def _get_current_hour_batch_id(self, table_ref: str, stat_date: str) -> str:
+        """获取当前小时 00-20 分钟内的 batch_id，不回退上一小时。"""
+        from datetime import datetime
+
+        now = datetime.now()
+        hour_start = f"{stat_date.replace('-', '')}_{now.hour:02d}0000"
+        hour_end = f"{stat_date.replace('-', '')}_{now.hour:02d}2000"
+
+        query = f"""
+        SELECT MAX(batch_id) as latest_batch_id
+        FROM `{table_ref}`
+        WHERE stat_date = '{stat_date}'
+          AND batch_id >= '{hour_start}'
+          AND batch_id < '{hour_end}'
+        """
+        try:
+            for row in self.client.query(query).result():
+                if row.latest_batch_id:
+                    logger.debug(f"找到当前小时 batch: {row.latest_batch_id}")
+                    return row.latest_batch_id
+        except Exception as e:
+            logger.error(f"查询当前小时 batch_id 失败: {e}")
+        return None
+
     def _get_quickbi_bi_batch_filter(self, stat_date: str) -> Optional[tuple]:
         """获取 BI 对照列使用的 QuickBI 表引用和 batch 过滤条件。"""
         quickbi_table_ref = f"{self.project_id}.quickbi_data.quickbi_campaigns"
@@ -1855,7 +1879,7 @@ class BigQueryUploader:
 
     # ============ 实时播报数据查询 (小时级) ============
 
-    def query_realtime_report_data(self, table_id: str = None, dataset_id: str = None, date: str = None, use_latest_batch: bool = False, use_same_day_batch: bool = False) -> Dict[str, Any]:
+    def query_realtime_report_data(self, table_id: str = None, dataset_id: str = None, date: str = None, use_latest_batch: bool = False, use_same_day_batch: bool = False, require_current_hour_batch: bool = False) -> Dict[str, Any]:
         """
         查询实时播报所需的全部数据 (当日累计)
 
@@ -1866,6 +1890,7 @@ class BigQueryUploader:
         Args:
             use_latest_batch: 是否使用绝对最新 batch（默认 False，使用整点 batch）
             use_same_day_batch: 是否使用同日 batch（batch_id 日期与 stat_date 相同）
+            require_current_hour_batch: 是否只接受当前小时 00-20 分钟内的 batch
 
         Returns:
             包含实时播报所需全部数据的字典
@@ -1886,7 +1911,9 @@ class BigQueryUploader:
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
 
         # 获取当日最新 batch_id
-        if use_same_day_batch:
+        if require_current_hour_batch:
+            batch_id = self._get_current_hour_batch_id(table_ref, today)
+        elif use_same_day_batch:
             batch_id = self._get_same_day_batch_id(table_ref, today)
         elif use_latest_batch:
             batch_id = self._get_absolute_latest_batch_id(table_ref, today)
@@ -2225,9 +2252,9 @@ class BigQueryUploader:
             else:
                 prev_date = current_date
             
-            # 查询范围：整点前后15分钟（00:00-15:00）
+            # 查询范围：整点前后15分钟（00:00-20:00）
             prev_hour_start = f"{prev_date.replace('-', '')}_{prev_hour:02d}0000"
-            prev_hour_end = f"{prev_date.replace('-', '')}_{prev_hour:02d}1000"
+            prev_hour_end = f"{prev_date.replace('-', '')}_{prev_hour:02d}2000"
             prev_hour_stat_date = prev_date
 
 

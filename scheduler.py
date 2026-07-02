@@ -32,6 +32,9 @@ DAILY_REPORT_BI_LINK = os.getenv('DAILY_REPORT_BI_LINK', 'https://bi.aliyun.com/
 class BrainScheduler:
     """核心调度器"""
 
+    REALTIME_WAIT_INTERVAL_SECONDS = 60
+    REALTIME_MAX_WAIT_SECONDS = 10 * 60
+
     def __init__(self):
         """初始化调度器"""
         # GCP 配置
@@ -59,6 +62,8 @@ class BrainScheduler:
         self.lark_bot = LarkBot(self.lark_webhook, self.lark_secret) if self.lark_webhook else None
         self.bq_uploader = BigQueryUploader(self.project_id, self.data_source_dataset)
         self.quickbi_uploader = BigQueryUploader(self.project_id, self.data_source_dataset)
+        self._now = datetime.now
+        self._sleep = time.sleep
 
         print(f"[Scheduler] 初始化完成")
         print(f"  - Project: {self.project_id}")
@@ -251,11 +256,12 @@ class BrainScheduler:
         Returns:
             发送结果
         """
-        current_hour = datetime.now().hour
+        start_time = self._now()
+        current_hour = start_time.hour
 
         # 凌晨 0-8 点跳过实时播报（XMP 数据在此时段为 T-1 日数据）
         if current_hour < 8:
-            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 凌晨 {current_hour}:00，跳过实时播报（XMP 当日数据尚未更新）")
+            print(f"\n[{self._now().strftime('%Y-%m-%d %H:%M:%S')}] 凌晨 {current_hour}:00，跳过实时播报（XMP 当日数据尚未更新）")
             return {
                 "hour": current_hour,
                 "success": True,
@@ -265,7 +271,7 @@ class BrainScheduler:
             }
 
         print(f"\n{'='*60}")
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始生成实时播报...")
+        print(f"[{self._now().strftime('%Y-%m-%d %H:%M:%S')}] 开始生成实时播报...")
         print(f"{'='*60}")
 
         result = {
@@ -277,18 +283,27 @@ class BrainScheduler:
         try:
             # 1. 查询当前实时数据
             print(f"[Step 1] 查询当日实时数据... (use_latest_batch={use_latest_batch})")
-            realtime_data = self.quickbi_uploader.query_realtime_report_data(use_latest_batch=use_latest_batch)
+            require_current_hour_batch = not use_latest_batch
+            realtime_data = self._wait_for_realtime_data(
+                use_latest_batch=use_latest_batch,
+                require_current_hour_batch=require_current_hour_batch,
+                start_time=start_time,
+            )
 
             # 检查数据同步状态
             if not realtime_data.get("summary") or not realtime_data.get("batch_id"):
-                print(f"  警告: 当日无数据，可能数据同步失败")
-                result["error"] = "无数据"
+                print(f"  警告: 本小时数据采集超时，跳过本小时播报")
+                result["error"] = "本小时数据采集超时"
+                result["skipped"] = True
+                result["reason"] = "本小时数据采集超时"
 
-                # 发送数据同步失败告警
                 if self.lark_bot:
                     self.lark_bot.send_alert(
                         alert_type="数据同步异常",
-                        message=f"实时播报查询不到当日数据，请检查 Quick BI 数据同步任务是否正常运行。",
+                        message=(
+                            f"{current_hour:02d}:10 触发实时播报后等待超过10分钟，"
+                            f"仍未抓取到本小时 XMP 数据，跳过本小时播报。"
+                        ),
                         level="error"
                     )
                 return result
@@ -313,8 +328,10 @@ class BrainScheduler:
                 send_result = self.lark_bot.send_realtime_report(realtime_data, None)
                 print(f"  发送结果: {send_result}")
                 result["success"] = send_result.get("code") == 0 or send_result.get("StatusCode") == 0
+                result["batch_id"] = realtime_data.get("batch_id")
             else:
                 print(f"\n[Step 2] Lark Bot 未配置，跳过发送")
+                result["batch_id"] = realtime_data.get("batch_id")
 
         except Exception as e:
             error_msg = f"实时播报生成失败: {str(e)}"
@@ -331,6 +348,42 @@ class BrainScheduler:
 
         print(f"\n[完成] 实时播报发送结束")
         return result
+
+    def _wait_for_realtime_data(
+        self,
+        use_latest_batch: bool,
+        require_current_hour_batch: bool,
+        start_time: datetime,
+    ) -> dict:
+        """Poll realtime data until the current-hour batch is ready or the wait window expires."""
+        warned = False
+
+        while True:
+            realtime_data = self.quickbi_uploader.query_realtime_report_data(
+                use_latest_batch=use_latest_batch,
+                require_current_hour_batch=require_current_hour_batch,
+            )
+            if realtime_data.get("summary") and realtime_data.get("batch_id"):
+                return realtime_data
+
+            elapsed = (self._now() - start_time).total_seconds()
+            if not require_current_hour_batch or elapsed >= self.REALTIME_MAX_WAIT_SECONDS:
+                return realtime_data
+
+            if not warned:
+                print("  警告: 本小时 XMP 数据尚未采集完成，开始等待")
+                if self.lark_bot:
+                    self.lark_bot.send_alert(
+                        alert_type="数据延迟警告",
+                        message=(
+                            f"{start_time.hour:02d}:10 实时播报未抓取到本小时 XMP 数据，"
+                            "等待采集完成。"
+                        ),
+                        level="warning",
+                    )
+                warned = True
+
+            self._sleep(self.REALTIME_WAIT_INTERVAL_SECONDS)
 
     def send_personal_reports(self) -> dict:
         """
