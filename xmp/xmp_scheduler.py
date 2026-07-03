@@ -278,8 +278,17 @@ class XMPBaseScraper:
                                 print(f"[XMP] 点击登录按钮失败，尝试回车提交: {e}")
                                 await page.locator('input[type="password"]').first.press('Enter')
                             await asyncio.sleep(10)
-                            if 'login' in page.url.lower():
+
+                            for i in range(3):
+                                if 'login' not in page.url.lower():
+                                    break
+
+                                print(f"[XMP] 登陆中，再等一会 ({i + 1}/3)")
                                 await asyncio.sleep(10)
+                            else:
+                                if 'login' in page.url.lower():
+                                    print("[XMP] 登录等待超过 3 次，放弃")
+                                    # return None / break / raise，看你外层流程怎么处理
                             if attempt == max_login_retries:
                                 try:
                                     screenshot_path = "xmp_login_error.png"
@@ -436,7 +445,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
                             XMP_LIST_URL,
                             json=payload,
                             headers=headers,
-                            timeout=aiohttp.ClientTimeout(total=60)
+                            timeout=aiohttp.ClientTimeout(total=90)
                         ) as response:
                             result = await response.json()
 
