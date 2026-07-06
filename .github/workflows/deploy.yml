@@ -51,6 +51,7 @@ jobs:
               - 'deploy/Dockerfile.scheduler'
               - 'deploy/start_scheduler.py'
               - 'deploy/cloudbuild-scheduler.yaml'
+              - '.github/workflows/deploy.yml'
 
   # ============================================================
   # QuickBI 数据采集器部署
