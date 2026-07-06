@@ -168,6 +168,8 @@ jobs:
             --set-env-vars "LARK_APP_ID=${{ secrets.LARK_APP_ID }}" \
             --set-env-vars "LARK_APP_SECRET=${{ secrets.LARK_APP_SECRET }}" \
             --set-env-vars "WEEKLY_REPORT_DOC_TOKEN=${{ secrets.WEEKLY_REPORT_DOC_TOKEN }}" \
+            --set-env-vars "XMP_USERNAME=${{ secrets.XMP_USERNAME }}" \
+            --set-env-vars "XMP_PASSWORD=${{ secrets.XMP_PASSWORD }}" \
             --set-env-vars "XMP_CLIENT_ID=${{ secrets.XMP_CLIENT_ID }}" \
             --set-env-vars "XMP_CLIENT_SECRET=${{ secrets.XMP_CLIENT_SECRET }}" \
             --set-env-vars "RULE_STOP_LOSS_MIN_SPEND=300" \
