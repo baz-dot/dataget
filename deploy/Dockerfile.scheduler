@@ -10,6 +10,8 @@ COPY . /app
 # 安装依赖
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN playwright install chromium --with-deps
+
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1
 

@@ -39,6 +39,8 @@ gcloud run deploy ${SERVICE_NAME} \
   --set-env-vars "LARK_APP_ID=cli_a9ef435701b85ed0" \
   --set-env-vars "LARK_APP_SECRET=YPEmLhKg1hSLarpVN7OVWge8lv2jm8na" \
   --set-env-vars "WEEKLY_REPORT_DOC_TOKEN=J04hwAsG6iTSjskVZeklMmArg1f" \
+  --set-env-vars "XMP_USERNAME=lanfeipeng@aixinhe.com" \
+  --set-env-vars "XMP_PASSWORD=Lanfeipeng0915" \
   --set-env-vars "XMP_CLIENT_ID=3d546dedfe2f3613af0da8202419b937" \
   --set-env-vars "XMP_CLIENT_SECRET=50172bbe0c83836153bc13c37dbe3830" \
   --set-env-vars "RULE_STOP_LOSS_MIN_SPEND=300" \
