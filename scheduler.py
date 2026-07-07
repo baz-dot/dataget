@@ -499,12 +499,12 @@ class BrainScheduler:
         # 立即执行一次策略分析（如果不跳过）
         if not skip_first_daily:
             self.run_analysis()
-
-        # 立即执行一次实时播报
-        print(f"\n[Scheduler] 立即执行第一次实时播报...")
-        self.send_realtime_report(use_latest_batch=use_latest_batch)
-
-
+        '''
+       print(f"\n[Scheduler] 立即执行第一次实时播报...")
+       self.send_realtime_report(use_latest_batch=use_latest_batch)
+       '''
+        print(f"\n[Scheduler] 立即执行sync_xmp_stats...")
+        self.sync_xmp_stats()
         # 设置定时任务
         schedule.every(interval_minutes).minutes.do(self.run_analysis)
 
