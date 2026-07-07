@@ -304,11 +304,12 @@ class XMPBaseScraper:
                                 await page.wait_for_selector('input[type="password"]', timeout=10000)
                             except Exception as e:
                                 print(f"[XMP] 等待登录表单超时或失败，继续尝试填写: {e}")
-                            print(f"XMP_USERNAME:{XMP_USERNAME}  XMP_PASSWORD:{XMP_PASSWORD}")
+                            print(f"[XMP] XMP_USERNAME:{XMP_USERNAME}")
                             await page.locator('input[type="text"]').first.fill(XMP_USERNAME)
                             await page.locator('input[type="password"]').first.fill(XMP_PASSWORD)
                             try:
-                                await page.click('button:has-text("登录")', timeout=5000)
+                                # 触发登录按钮
+                                await page.locator('button.el-button--primary, button.ant-btn-primary').first.click(timeout=5000)
                             except Exception as e:
                                 print(f"[XMP] 点击登录按钮失败，尝试回车提交: {e}")
                                 await page.locator('input[type="password"]').first.press('Enter')
