@@ -501,8 +501,12 @@ class BrainScheduler:
             self.run_analysis()
 
         # 立即执行一次实时播报
+        '''
         print(f"\n[Scheduler] 立即执行第一次实时播报...")
         self.send_realtime_report(use_latest_batch=use_latest_batch)
+        '''
+        print(f"\n[Scheduler] 立即执行sync_xmp_stats...")
+        self.sync_xmp_stats()
 
         # 设置定时任务
         schedule.every(interval_minutes).minutes.do(self.run_analysis)
@@ -617,14 +621,14 @@ class BrainScheduler:
             error_msg = f"XMP 统计同步失败: {str(e)}"
             print(f"[Error] {error_msg}")
             result["error"] = error_msg
-
+            '''
             if self.lark_bot:
                 self.lark_bot.send_alert(
                     alert_type="XMP 统计同步失败",
                     message=error_msg,
                     level="error"
                 )
-
+            '''
         return result
 
     def sync_drama_mapping(self) -> dict:

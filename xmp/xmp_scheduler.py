@@ -226,6 +226,18 @@ class XMPBaseScraper:
         except Exception as e:
             print(f"[XMP] 保存 Token 失败: {e}")
 
+    async def _save_login_diagnostic_screenshot(self, page, screenshot_path: str):
+        try:
+            await page.screenshot(path=screenshot_path, full_page=True)
+            print(f"[XMP] 登录诊断页面截图已保存: {screenshot_path}")
+
+            from gcs_storage import GCSUploader
+            blob_path = f"xmp/login_diagnostics/{screenshot_path}"
+            uri = GCSUploader("xmp_raw_data_storage").upload_file(screenshot_path, blob_path)
+            print(f"[XMP] 登录诊断页面截图已上传: {uri}")
+        except Exception as screenshot_error:
+            print(f"[XMP] 保存或上传登录诊断截图失败: {screenshot_error}")
+
     async def login_and_get_token(self, headless: bool = True) -> Optional[str]:
         """登录 XMP 获取 Token"""
         from playwright.async_api import async_playwright
@@ -255,6 +267,7 @@ class XMPBaseScraper:
                     await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
                 except Exception as e:
                     print(f"[XMP] 打开 XMP 账号页面失败，尝试继续检查当前页面状态: {e}")
+                    await self._save_login_diagnostic_screenshot(page, "xmp_open_error.png")
                 await asyncio.sleep(3)
 
                 if 'login' in page.url.lower():
@@ -290,18 +303,7 @@ class XMPBaseScraper:
                                     print("[XMP] 登录等待超过 3 次，放弃")
                                     # return None / break / raise，看你外层流程怎么处理
                             if attempt == max_login_retries:
-                                try:
-                                    screenshot_path = "xmp_login_error.png"
-                                    await page.screenshot(path=screenshot_path, full_page=True)
-                                    print("[XMP] 登录失败页面截图已保存: xmp_login_error.png")
-
-                                    from gcs_storage import GCSUploader
-                                    blob_path = "xmp/login_diagnostics/xmp_login_error.png"
-                                    uri = GCSUploader("xmp_raw_data_storage").upload_file(screenshot_path, blob_path)
-                                    print(f"[XMP] 登录失败页面截图已上传: {uri}")
-
-                                except Exception as screenshot_error:
-                                    print(f"[XMP] 保存或上传登录失败截图失败: {screenshot_error}")
+                                await self._save_login_diagnostic_screenshot(page, "xmp_login_error.png")
                             await page.goto("https://xmp.mobvista.com/ads_manage/tiktok/account", wait_until='domcontentloaded', timeout=60000)
                             if 'login' not in page.url.lower():
                                 break
