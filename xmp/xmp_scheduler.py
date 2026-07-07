@@ -186,6 +186,7 @@ class XMPBaseScraper:
 
     def __init__(self):
         self.bearer_token = None
+        self.tri = None
         self.token_updated_at = None
         self._load_token()
 
@@ -196,6 +197,7 @@ class XMPBaseScraper:
             with open(XMP_TOKEN_FILE, 'r') as f:
                 data = json.load(f)
             self.bearer_token = data.get('token')
+            self.tri = data.get('tri')
             updated_str = data.get('updated')
             if updated_str:
                 self.token_updated_at = datetime.fromisoformat(updated_str)
@@ -207,6 +209,9 @@ class XMPBaseScraper:
         return False
 
     def _should_refresh_token(self) -> bool:
+        if not self.tri:
+            print(f"[XMP] Token 缺少 tri，需要刷新")
+            return True
         if not self.token_updated_at:
             return True
         days_since_update = (datetime.now() - self.token_updated_at).days
@@ -217,14 +222,26 @@ class XMPBaseScraper:
         print(f"[XMP] Token 已使用 {days_since_update} 天，有效期内")
         return False
 
-    def _save_token(self, token: str):
+    def _save_token(self, token: str, tri: str = None):
+        tri = tri if tri is not None else self.tri
         try:
             with open(XMP_TOKEN_FILE, 'w') as f:
-                json.dump({'token': token, 'updated': datetime.now().isoformat()}, f)
+                json.dump({'token': token, 'tri': tri, 'updated': datetime.now().isoformat()}, f)
             self.token_updated_at = datetime.now()
             print(f"[XMP] Token 已保存")
         except Exception as e:
             print(f"[XMP] 保存 Token 失败: {e}")
+
+    def _api_headers(self) -> Dict[str, str]:
+        headers = {
+            "Authorization": self.bearer_token,
+            "Content-Type": "application/json",
+            "Origin": "https://xmp.mobvista.com",
+            "Referer": "https://xmp.mobvista.com/"
+        }
+        if self.tri:
+            headers["tri"] = self.tri
+        return headers
 
     async def _save_login_diagnostic_screenshot(self, page, screenshot_path: str):
         try:
@@ -254,13 +271,18 @@ class XMPBaseScraper:
                         print(f"[XMP] 加载 cookies 失败，将继续走登录流程: {e}")
                 page = await context.new_page()
                 captured_token = None
+                captured_tri = None
 
                 async def capture_request(request):
-                    nonlocal captured_token
+                    nonlocal captured_token, captured_tri
                     auth = request.headers.get('authorization', '')
+                    tri = request.headers.get('tri', '')
                     if auth.startswith('Bearer ') and not captured_token:
                         captured_token = auth
                         print(f"[XMP] 捕获到 Token")
+                    if tri and not captured_tri:
+                        captured_tri = tri
+                        print(f"[XMP] 捕获到 tri")
 
                 page.on('request', capture_request)
                 try:
@@ -329,8 +351,10 @@ class XMPBaseScraper:
                     print(f"[XMP] 保存 cookies 失败: {e}")
 
                 if captured_token:
-                    self._save_token(captured_token)
+                    captured_tri = captured_tri or self.tri
+                    self._save_token(captured_token, captured_tri)
                     self.bearer_token = captured_token
+                    self.tri = captured_tri
 
                 return captured_token
             finally:
@@ -414,12 +438,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         page_retries = 0
         MAX_PAGE_RETRIES = 2
 
-        headers = {
-            "Authorization": self.bearer_token,
-            "Content-Type": "application/json",
-            "Origin": "https://xmp.mobvista.com",
-            "Referer": "https://xmp.mobvista.com/"
-        }
+        headers = self._api_headers()
 
         # 构建字段列表
         base_fields = "campaign_id,campaign_name,cost,impression,click,status,geo"
@@ -554,12 +573,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         page_retries = 0
         MAX_PAGE_RETRIES = 2
 
-        headers = {
-            "Authorization": self.bearer_token,
-            "Content-Type": "application/json",
-            "Origin": "https://xmp.mobvista.com",
-            "Referer": "https://xmp.mobvista.com/"
-        }
+        headers = self._api_headers()
 
         # 获取渠道配置的收入字段
         channel_cfg = CHANNEL_CONFIG.get(channel, {})
@@ -691,12 +705,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
         page_retries = 0
         MAX_PAGE_RETRIES = 2
 
-        headers = {
-            "Authorization": self.bearer_token,
-            "Content-Type": "application/json",
-            "Origin": "https://xmp.mobvista.com",
-            "Referer": "https://xmp.mobvista.com/"
-        }
+        headers = self._api_headers()
 
         # 获取渠道配置的收入字段
         channel_cfg = CHANNEL_CONFIG.get(channel, {})
@@ -819,12 +828,7 @@ class XMPMultiChannelScraper(XMPBaseScraper):
             "page_size": 100
         }
 
-        headers = {
-            "Authorization": self.bearer_token,
-            "Content-Type": "application/json",
-            "Origin": "https://xmp.mobvista.com",
-            "Referer": "https://xmp.mobvista.com/"
-        }
+        headers = self._api_headers()
 
         try:
             async with XMP_API_SEM:
@@ -1534,7 +1538,7 @@ async def run_once(date_str: str = None, upload_bq: bool = False):
         return result
 
     # 并行获取: 投手统计 + 剪辑师数据 (Meta designers × 2 + TikTok ads)
-    optimizer_task = fetch_optimizer_summary_stats(scraper.bearer_token, date_str)
+    optimizer_task = fetch_optimizer_summary_stats(scraper.bearer_token, date_str, tri=scraper.tri)
     designers_0_task = scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="0")
     designers_1_task = scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="1")
     tk_ads_task = scraper.fetch_channel_ads('tiktok', date_str, date_str)
@@ -1627,7 +1631,8 @@ async def run_once(date_str: str = None, upload_bq: bool = False):
 async def fetch_optimizer_summary_stats(
     bearer_token: str,
     date_str: str,
-    optimizer_list: List[str] = None
+    optimizer_list: List[str] = None,
+    tri: str = None
 ) -> List[Dict]:
     """
     使用 channel/summary API 获取投手汇总数据
@@ -1652,6 +1657,8 @@ async def fetch_optimizer_summary_stats(
         "Origin": "https://xmp.mobvista.com",
         "Referer": "https://xmp.mobvista.com/"
     }
+    if tri:
+        headers["tri"] = tri
 
     async def _fetch_one_optimizer(optimizer):
         """并行获取单个投手的所有渠道数据"""
@@ -1780,7 +1787,8 @@ async def fetch_optimizer_summary_stats(
 
 async def fetch_editor_tiktok_stats(
     bearer_token: str,
-    date_str: str
+    date_str: str,
+    tri: str = None
 ) -> List[Dict]:
     """
     使用 channel/summary API 获取剪辑师 TikTok 数据
@@ -1800,6 +1808,8 @@ async def fetch_editor_tiktok_stats(
         "Origin": "https://xmp.mobvista.com",
         "Referer": "https://xmp.mobvista.com/"
     }
+    if tri:
+        headers["tri"] = tri
 
     for cn_name, aliases in EDITOR_NAME_MAP.items():
         # 搜索所有可能的名字（英文名 + 中文名 + 姓氏）
@@ -1863,7 +1873,8 @@ async def fetch_editor_tiktok_stats(
 
 async def fetch_editor_facebook_stats(
     bearer_token: str,
-    date_str: str
+    date_str: str,
+    tri: str = None
 ) -> List[Dict]:
     """
     使用 channel/list API 获取剪辑师 Facebook 数据
@@ -1883,6 +1894,8 @@ async def fetch_editor_facebook_stats(
         "Origin": "https://xmp.mobvista.com",
         "Referer": "https://xmp.mobvista.com/"
     }
+    if tri:
+        headers["tri"] = tri
 
     # 使用 designer level 获取所有剪辑师数据
     payload = {
@@ -1976,7 +1989,8 @@ async def fetch_editor_facebook_stats(
 
 async def fetch_editor_combined_stats(
     bearer_token: str,
-    date_str: str
+    date_str: str,
+    tri: str = None
 ) -> List[Dict]:
     """
     获取剪辑师完整数据（TikTok + Facebook 合并）
@@ -1989,8 +2003,8 @@ async def fetch_editor_combined_stats(
         剪辑师完整统计列表
     """
     # 并行获取 TikTok 和 Facebook 数据
-    tt_data = await fetch_editor_tiktok_stats(bearer_token, date_str)
-    fb_data = await fetch_editor_facebook_stats(bearer_token, date_str)
+    tt_data = await fetch_editor_tiktok_stats(bearer_token, date_str, tri=tri)
+    fb_data = await fetch_editor_facebook_stats(bearer_token, date_str, tri=tri)
 
     # 合并数据
     results = []
@@ -2451,7 +2465,7 @@ async def run_with_stats(date_str: str = None, upload_bq: bool = False):
         return result
 
     # 2. 并行获取: 投手统计 + 剪辑师数据
-    optimizer_task = fetch_optimizer_summary_stats(scraper.bearer_token, date_str)
+    optimizer_task = fetch_optimizer_summary_stats(scraper.bearer_token, date_str, tri=scraper.tri)
     designers_0_task = scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="0")
     designers_1_task = scraper.fetch_channel_designers('facebook', date_str, date_str, is_xmp="1")
     tk_ads_task = scraper.fetch_channel_ads('tiktok', date_str, date_str)
