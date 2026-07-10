@@ -1714,9 +1714,13 @@ class BigQueryUploader:
 
             # 3. 投手排行
             for row in self.client.query(optimizer_query).result():
+                spend = float(row.spend or 0)
+                # 过滤投手为0的数据
+                if spend <= 0:
+                    continue
                 result["optimizers"].append({
                     "name": row.optimizer,
-                    "spend": float(row.spend or 0),
+                    "spend": spend,
                     "revenue": float(row.revenue or 0),
                     "roas": float(row.roas or 0),
                     "campaign_count": int(row.campaign_count or 0),

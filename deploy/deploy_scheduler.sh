@@ -32,6 +32,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --memory 1Gi \
   --min-instances 1 \
   --max-instances 1 \
+  --no-cpu-throttling \
   --set-env-vars "TZ=Asia/Shanghai" \
   --set-env-vars "BQ_PROJECT_ID=${PROJECT_ID}" \
   --set-env-vars "BQ_DATASET_ID=quickbi_data" \
