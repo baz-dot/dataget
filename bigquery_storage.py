@@ -2205,10 +2205,10 @@ class BigQueryUploader:
         now = datetime.now()
         current_hour_int = now.hour
 
-        # 查询昨天当前整点的 batch_id（整点前后10分钟范围）
+        # 查询昨天当前整点的 batch_id（整点前后20分钟范围）
         yesterday_date_str = yesterday.replace('-', '')
         yesterday_hour_start = f"{yesterday_date_str}_{current_hour_int:02d}0000"
-        yesterday_hour_end = f"{yesterday_date_str}_{current_hour_int:02d}1000"
+        yesterday_hour_end = f"{yesterday_date_str}_{current_hour_int:02d}2000"
 
         yesterday_batch_query = f"""
         SELECT batch_id
