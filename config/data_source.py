@@ -4,7 +4,7 @@
 """
 
 # 数据源选择: "quickbi" 或 "xmp" 或 "xmp_internal"
-DATA_SOURCE = "xmp_internal"
+DATA_SOURCE = "quickbi"
 
 # QuickBI 配置
 QUICKBI_CONFIG = {
