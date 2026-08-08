@@ -52,6 +52,7 @@ class BrainScheduler:
         data_source_config = get_data_source_config()
         self.data_source_dataset = data_source_config["dataset_id"]
         self.data_source_table = data_source_config["table_id"]
+        self.data_source_label = data_source_config.get("label", "数据源")
 
         # 初始化组件
         self.rule_engine = RuleEngine(
@@ -302,7 +303,7 @@ class BrainScheduler:
                         alert_type="数据同步异常",
                         message=(
                             f"{current_hour:02d}:10 触发实时播报后等待超过10分钟，"
-                            f"仍未抓取到本小时 XMP 数据，跳过本小时播报。"
+                            f"仍未抓取到本小时 {self.data_source_label} 数据，跳过本小时播报。"
                         ),
                         level="error"
                     )
@@ -371,12 +372,12 @@ class BrainScheduler:
                 return realtime_data
 
             if not warned:
-                print("  警告: 本小时 XMP 数据尚未采集完成，开始等待")
+                print(f"  警告: 本小时 {self.data_source_label} 数据尚未采集完成，开始等待")
                 if self.lark_bot:
                     self.lark_bot.send_alert(
                         alert_type="数据延迟警告",
                         message=(
-                            f"{start_time.hour:02d}:10 实时播报未抓取到本小时 XMP 数据，"
+                            f"{start_time.hour:02d}:10 实时播报未抓取到本小时 {self.data_source_label} 数据，"
                             "等待采集完成。"
                         ),
                         level="warning",

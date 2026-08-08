@@ -10,18 +10,21 @@ DATA_SOURCE = "quickbi"
 QUICKBI_CONFIG = {
     "dataset_id": "quickbi_data",
     "table_id": "quickbi_campaigns",
+    "label": "QuickBI",
 }
 
 # XMP 配置 (Open API)
 XMP_CONFIG = {
     "dataset_id": "xmp_data",
     "table_id": "xmp_campaigns_view",
+    "label": "XMP",
 }
 
 # XMP 内部 API 配置
 XMP_INTERNAL_CONFIG = {
     "dataset_id": "xmp_data",
     "table_id": "xmp_internal_campaigns_view",  # 视图已包含 media_user_revenue 字段
+    "label": "XMP",
 }
 
 
