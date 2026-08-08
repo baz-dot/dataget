@@ -23,7 +23,7 @@ from rule_engine import RuleEngine, RuleConfig
 from lark.lark_bot import LarkBot, OPTIMIZER_USER_MAP
 from lark.personal_assistant import PersonalAssistant
 from bigquery_storage import BigQueryUploader
-from config.data_source import get_data_source_config
+from config.data_source import get_data_source_config, DATA_SOURCE
 
 # 日报配置
 DAILY_REPORT_BI_LINK = os.getenv('DAILY_REPORT_BI_LINK', 'https://bi.aliyun.com/product/vigloo.htm?menuId=f438317d-6f93-4561-8fb2-e85bf2e9aea8&accounttraceid=ee0ec5d2837043b595c3c6a6df78b4b3lglk')
@@ -273,6 +273,7 @@ class BrainScheduler:
 
         print(f"\n{'='*60}")
         print(f"[{self._now().strftime('%Y-%m-%d %H:%M:%S')}] 开始生成实时播报...")
+        print(f"[Scheduler] DATA_SOURCE = {DATA_SOURCE}")
         print(f"{'='*60}")
 
         result = {
