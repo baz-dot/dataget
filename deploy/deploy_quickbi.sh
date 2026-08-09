@@ -74,10 +74,10 @@ gcloud run jobs update ${JOB_NAME} \
     --set-env-vars "TZ=Asia/Shanghai" \
     --quiet
 
-echo "=== 5. 创建 Cloud Scheduler 定时任务（每小时03分执行 (batch 落 KST 整点后~5分, 满足播报窗口)）==="
+echo "=== 5. 创建 Cloud Scheduler 定时任务（每小时整点执行 (batch 落 KST 整点后 2-5 分, 距 :10 播报余量 ~7 分钟)）==="
 gcloud scheduler jobs create http ${JOB_NAME}-scheduler \
     --location ${REGION} \
-    --schedule "3 * * * *" \
+    --schedule "0 * * * *" \
     --time-zone "Asia/Shanghai" \
     --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
     --http-method POST \
@@ -85,7 +85,7 @@ gcloud scheduler jobs create http ${JOB_NAME}-scheduler \
     --quiet 2>/dev/null || \
 gcloud scheduler jobs update http ${JOB_NAME}-scheduler \
     --location ${REGION} \
-    --schedule "3 * * * *" \
+    --schedule "0 * * * *" \
     --time-zone "Asia/Shanghai" \
     --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
     --http-method POST \
