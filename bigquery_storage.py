@@ -2100,25 +2100,27 @@ class BigQueryUploader:
             result["api_update_time"] = api_update_time.strftime('%Y-%m-%d %H:%M:%S')
             result["batch_time"] = api_update_time.strftime('%H:%M')  # 当前batch时间点 (KST)
 
-            # 检查数据延迟 - 基于当前小时是否有数据
+            # 检查数据延迟 - 仅对 KST 当天的实时查询有意义;
+            # 查历史日期(收官播报)时, 全天最后批次必然是 23 点的, 不属于延迟
             now = kst_now()
-            current_hour = now.hour
-            batch_hour = api_update_time.hour
-            current_minute = now.minute
+            if today == now.strftime('%Y-%m-%d'):
+                current_hour = now.hour
+                batch_hour = api_update_time.hour
+                current_minute = now.minute
 
-            # 判断延迟逻辑：
-            # 1. 如果 batch 小时 == 当前小时 → 正常
-            # 2. 如果 batch 小时 == 当前小时-1 且 当前分钟 < 5 → 正常（还在等同步）
-            # 3. 其他情况 → 延迟
-            if batch_hour == current_hour:
-                # 当前小时有数据，正常
-                pass
-            elif batch_hour == (current_hour - 1) % 24 and current_minute < 5:
-                # 上一小时数据，但当前分钟<5，还在等同步，正常
-                pass
-            else:
-                # 延迟
-                result["data_delayed"] = True
+                # 判断延迟逻辑：
+                # 1. 如果 batch 小时 == 当前小时 → 正常
+                # 2. 如果 batch 小时 == 当前小时-1 且 当前分钟 < 5 → 正常（还在等同步）
+                # 3. 其他情况 → 延迟
+                if batch_hour == current_hour:
+                    # 当前小时有数据，正常
+                    pass
+                elif batch_hour == (current_hour - 1) % 24 and current_minute < 5:
+                    # 上一小时数据，但当前分钟<5，还在等同步，正常
+                    pass
+                else:
+                    # 延迟
+                    result["data_delayed"] = True
         except Exception:
             pass
 
