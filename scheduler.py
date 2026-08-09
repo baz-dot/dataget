@@ -25,8 +25,16 @@ from lark.personal_assistant import PersonalAssistant
 from bigquery_storage import BigQueryUploader
 from config.data_source import get_data_source_config, DATA_SOURCE
 
-# 日报配置
-DAILY_REPORT_BI_LINK = os.getenv('DAILY_REPORT_BI_LINK', 'https://bi.aliyun.com/product/vigloo.htm?menuId=f438317d-6f93-4561-8fb2-e85bf2e9aea8&accounttraceid=ee0ec5d2837043b595c3c6a6df78b4b3lglk')
+# 日报配置 (指向 [DBT] Data Overview 看板, 与播报同口径)
+DAILY_REPORT_BI_LINK = os.getenv('DAILY_REPORT_BI_LINK', 'https://bi.aliyun.com/product/vigloo.htm?menuId=737e316b-6628-4f88-80a2-f94c5016259d')
+
+# KST 时区 (UTC+9): dbt 数据源的 kst_date 口径。调度触发时刻仍用北京时间, 数据日期一律用 KST
+KST_OFFSET = timedelta(hours=9)
+
+
+def kst_now() -> datetime:
+    """KST 墙上时间 (naive datetime)"""
+    return datetime.utcnow() + KST_OFFSET
 
 
 class BrainScheduler:
@@ -100,7 +108,7 @@ class BrainScheduler:
             分析结果摘要
         """
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = kst_now().strftime('%Y-%m-%d')  # 数据日期按 KST
 
         print(f"\n{'='*60}")
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始分析...")
@@ -186,7 +194,7 @@ class BrainScheduler:
             发送结果
         """
         if date is None:
-            date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            date = (kst_now() - timedelta(days=1)).strftime('%Y-%m-%d')  # T-1 按 KST 昨天
 
         print(f"\n{'='*60}")
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始生成日报...")
@@ -242,17 +250,16 @@ class BrainScheduler:
         print(f"\n[完成] 日报发送结束")
         return result
 
-    def send_realtime_report(self, use_latest_batch: bool = False) -> dict:
+    def send_realtime_report(self, use_latest_batch: bool = False, report_date: str = None) -> dict:
         """
-        发送实时播报 (08:00-24:00)
+        发送实时播报 (北京时间 09:10-22:10 每小时; 数据日期按 KST 当天)
 
         目标：为执行层提供实时监控，发现异动，即时调整
         播报群：vigloo投放剪辑群 + 个人推送
 
-        注意：凌晨 0-8 点跳过播报，因为 XMP API 在此时段返回的是昨天的数据
-
         Args:
             use_latest_batch: 是否使用绝对最新 batch（默认 False，使用整点 batch）
+            report_date: 指定数据日期 YYYY-MM-DD (收官播报传 KST 昨天; 默认 None = KST 今天)
 
         Returns:
             发送结果
@@ -261,8 +268,8 @@ class BrainScheduler:
         current_hour = start_time.hour
 
         # 凌晨 0-8 点跳过实时播报（XMP 数据在此时段为 T-1 日数据）
-        if current_hour < 8:
-            print(f"\n[{self._now().strftime('%Y-%m-%d %H:%M:%S')}] 凌晨 {current_hour}:00，跳过实时播报（XMP 当日数据尚未更新）")
+        if current_hour < 9:
+            print(f"\n[{self._now().strftime('%Y-%m-%d %H:%M:%S')}] 凌晨 {current_hour}:00，跳过实时播报（KST 当日数据尚未累积）")
             return {
                 "hour": current_hour,
                 "success": True,
@@ -290,6 +297,7 @@ class BrainScheduler:
                 use_latest_batch=use_latest_batch,
                 require_current_hour_batch=require_current_hour_batch,
                 start_time=start_time,
+                report_date=report_date,
             )
 
             # 检查数据同步状态
@@ -320,8 +328,24 @@ class BrainScheduler:
                         level="warning"
                     )
 
+            # 检查上游 dbt 停更 (采集正常但上游 ETL 批次戳长时间不前进)
+            upstream_time = self.bq_uploader.get_upstream_batched_time()
+            if upstream_time:
+                upstream_lag = kst_now() - upstream_time
+                print(f"  上游 dbt 批次: {upstream_time.strftime('%Y-%m-%d %H:%M')} KST (滞后 {upstream_lag.total_seconds()/3600:.1f} 小时)")
+                if upstream_lag > timedelta(hours=2) and self.lark_bot:
+                    self.lark_bot.send_alert(
+                        alert_type="上游数据停更",
+                        message=(
+                            f"上游 dbt 数据集 ETL 批次戳已 {upstream_lag.total_seconds()/3600:.1f} 小时未更新"
+                            f"（最新: {upstream_time.strftime('%Y-%m-%d %H:%M')} KST），"
+                            f"播报数据可能不新鲜，请联系数据团队检查 dbt 链路。"
+                        ),
+                        level="warning"
+                    )
+
             print(f"  当前总消耗: ${realtime_data['summary'].get('total_spend', 0):,.2f}")
-            print(f"  当前 Media ROAS: {realtime_data['summary'].get('media_roas', 0):.1%}")
+            print(f"  当前 MMP ROAS: {realtime_data['summary'].get('mmp_roas', 0):.1%}")
             print(f"  数据延迟: {'是' if realtime_data.get('data_delayed') else '否'}")
 
             # 2. 发送实时播报
@@ -351,17 +375,30 @@ class BrainScheduler:
         print(f"\n[完成] 实时播报发送结束")
         return result
 
+    def send_closing_report(self) -> dict:
+        """
+        KST 昨日收官播报 (北京时间 23:10 触发 = KST 00:10, KST 昨天刚结束)
+
+        播 KST 昨日全天最终数据: 用最新 batch, 不要求本小时 batch。
+        这是每天最后一班播报, 给出全天定稿数字。
+        """
+        closing_date = (kst_now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        print(f"\n[Scheduler] 收官播报: KST {closing_date} 全天最终数据")
+        return self.send_realtime_report(use_latest_batch=True, report_date=closing_date)
+
     def _wait_for_realtime_data(
         self,
         use_latest_batch: bool,
         require_current_hour_batch: bool,
         start_time: datetime,
+        report_date: str = None,
     ) -> dict:
         """Poll realtime data until the current-hour batch is ready or the wait window expires."""
         warned = False
 
         while True:
             realtime_data = self.quickbi_uploader.query_realtime_report_data(
+                date=report_date,
                 use_latest_batch=use_latest_batch,
                 require_current_hour_batch=require_current_hour_batch,
             )
@@ -514,15 +551,20 @@ class BrainScheduler:
         schedule.every().day.at("09:00").do(self.send_daily_report)
         print(f"[Scheduler] 已设置每日 09:00 日报播报")
 
-        # 设置每日 8:00-24:00 整点实时播报 (每小时10分触发，等待QuickBI数据同步)
-        for hour in range(8, 24):
+        # 设置每日 9:10-22:10 当日实时播报 (每小时10分触发; 数据日期 = KST 当天)
+        # 注: KST 日切 = 北京 23:00, 22:10 是 KST 当天最后一班有意义的实时播报
+        for hour in range(9, 23):
             schedule.every().day.at(f"{hour:02d}:10").do(self.send_realtime_report)
-        print(f"[Scheduler] 已设置每日 8:10-23:10 实时播报 (每小时10分触发)")
+        print(f"[Scheduler] 已设置每日 9:10-22:10 实时播报 (每小时10分触发, KST 当天)")
 
-        # 设置每日 9:15-23:15 个人播报 (每小时15分触发，在实时播报之后)
-        for hour in range(9, 24):
+        # 设置每日 23:10 收官播报 (KST 00:10, 播 KST 昨日全天最终数据)
+        schedule.every().day.at("23:10").do(self.send_closing_report)
+        print(f"[Scheduler] 已设置每日 23:10 收官播报 (KST 昨日全天定稿)")
+
+        # 设置每日 9:15-22:15 个人播报 (每小时15分触发，在实时播报之后)
+        for hour in range(9, 23):
             schedule.every().day.at(f"{hour:02d}:15").do(self.send_personal_reports)
-        print(f"[Scheduler] 已设置每日 9:15-23:15 个人播报 (每小时15分触发)")
+        print(f"[Scheduler] 已设置每日 9:15-22:15 个人播报 (每小时15分触发)")
 
         # 设置每周一 09:30 周报
         schedule.every().monday.at("09:30").do(self.send_weekly_report)

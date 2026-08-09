@@ -43,7 +43,7 @@ print(f"  Optimizer: {zombie_data.get('optimizer')}")
 print(f"  Zombie alerts: {len(zombie_data.get('zombie_alerts', []))}")
 
 for z in zombie_data.get('zombie_alerts', []):
-    print(f"    [ZOMBIE] {z['drama_name']}({z['country']}): ROAS {z['roas']:.0%}")
+    print(f"    [ZOMBIE] {z['drama_name']}({z['country_code']}): ROAS {z['roas']:.0%}")
 
 # 发送消息
 print(f"\n[2] Send zombie alert...")

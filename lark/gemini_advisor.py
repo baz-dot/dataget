@@ -79,7 +79,7 @@ class GeminiAdvisor:
                 - summary: {total_spend, global_roas}
                 - dramas: [{name, spend, roas}] 所有剧集数据
                 - countries: [{name, spend, roas}] 所有国家数据
-                - drama_country: [{drama_name, country, spend, roas}] 剧集x国家维度数据
+                - drama_country: [{drama_name, country_code, spend, roas}] 剧集x国家维度数据
                 - top3_countries: [str] 主投Top3国家列表
 
         Returns:
@@ -113,7 +113,7 @@ class GeminiAdvisor:
             dc for dc in drama_country
             if dc.get("spend", 0) > 100
             and dc.get("roas", 0) > 0.50
-            and dc.get("country", "") not in top3_countries
+            and dc.get("country_code", "") not in top3_countries
         ]
         # 按 ROAS 降序排序
         opportunity_candidates.sort(key=lambda x: x.get("roas", 0), reverse=True)
@@ -182,7 +182,7 @@ class GeminiAdvisor:
         opportunity_text = ""
         if opportunity_candidates:
             opportunity_text = "\n".join([
-                f"- 《{dc['drama_name']}》在 {dc['country']}: 消耗${dc['spend']:.0f}, ROAS {dc['roas']:.0%}"
+                f"- 《{dc['drama_name']}》在 {dc['country_code']}: 消耗${dc['spend']:.0f}, ROAS {dc['roas']:.0%}"
                 for dc in opportunity_candidates[:5]
             ])
         else:
@@ -314,7 +314,7 @@ class GeminiAdvisor:
         # 机会市场
         if opportunity_candidates:
             dc = opportunity_candidates[0]
-            result["opportunity_market"] = f"剧集《{dc['drama_name']}》在 [{dc['country']}] ROAS {dc['roas']:.0%}，建议增投"
+            result["opportunity_market"] = f"剧集《{dc['drama_name']}》在 [{dc['country_code']}] ROAS {dc['roas']:.0%}，建议增投"
 
         # 测剧建议
         if len(dramas) < 3:
@@ -343,10 +343,10 @@ class GeminiAdvisor:
 
         Args:
             data: 实时播报数据，包含:
-                - summary: {total_spend, media_roas}
-                - stop_loss_campaigns: [{campaign_name, optimizer, spend, roas, drama_name, country}]
-                - scale_up_campaigns: [{campaign_name, optimizer, spend, roas, drama_name, country}]
-                - country_marginal_roas: [{country, spend, roas}]
+                - summary: {total_spend, mmp_roas}
+                - stop_loss_campaigns: [{campaign_name, optimizer, spend, roas, drama_name, country_code}]
+                - scale_up_campaigns: [{campaign_name, optimizer, spend, roas, drama_name, country_code}]
+                - country_marginal_roas: [{country_code, spend, roas}]
 
         Returns:
             {
@@ -394,13 +394,13 @@ class GeminiAdvisor:
         """构建实时播报 AI 建议 Prompt"""
 
         total_spend = summary.get("total_spend", 0)
-        media_roas = summary.get("media_roas", 0)
+        mmp_roas = summary.get("mmp_roas", 0)
 
         # 格式化止损计划
         stop_loss_text = ""
         if stop_loss:
             stop_loss_text = "\n".join([
-                f"- {c.get('optimizer', '未知')}: 《{c.get('drama_name', '未知')}》({c.get('country', '未知')}) 消耗${c.get('spend', 0):.0f}, ROAS {c.get('roas', 0):.0%}"
+                f"- {c.get('optimizer', '未知')}: 《{c.get('drama_name', '未知')}》({c.get('country_code', '未知')}) 消耗${c.get('spend', 0):.0f}, ROAS {c.get('roas', 0):.0%}"
                 for c in stop_loss[:5]
             ])
         else:
@@ -410,7 +410,7 @@ class GeminiAdvisor:
         scale_up_text = ""
         if scale_up:
             scale_up_text = "\n".join([
-                f"- {c.get('optimizer', '未知')}: 《{c.get('drama_name', '未知')}》({c.get('country', '未知')}) 消耗${c.get('spend', 0):.0f}, ROAS {c.get('roas', 0):.0%}"
+                f"- {c.get('optimizer', '未知')}: 《{c.get('drama_name', '未知')}》({c.get('country_code', '未知')}) 消耗${c.get('spend', 0):.0f}, ROAS {c.get('roas', 0):.0%}"
                 for c in scale_up[:5]
             ])
         else:
@@ -420,7 +420,7 @@ class GeminiAdvisor:
         high_roas_countries = [c for c in country_roas if c.get("roas", 0) > 0.50][:5]
         country_text = ""
         if high_roas_countries:
-            country_text = ", ".join([f"{c['country']}({c['roas']:.0%})" for c in high_roas_countries])
+            country_text = ", ".join([f"{c['country_code']}({c['roas']:.0%})" for c in high_roas_countries])
         else:
             country_text = "暂无"
 
@@ -428,7 +428,7 @@ class GeminiAdvisor:
 
 ## 当前大盘数据
 - 截止当前总消耗: ${total_spend:,.0f}
-- 当前 Media ROAS: {media_roas:.1%}
+- 当前 MMP ROAS: {mmp_roas:.1%}
 
 ## 止损预警计划（已筛选：Spend>$300 且 ROAS<30%）
 {stop_loss_text}
@@ -527,7 +527,7 @@ class GeminiAdvisor:
     ) -> Dict[str, str]:
         """实时播报降级策略"""
 
-        media_roas = summary.get("media_roas", 0)
+        mmp_roas = summary.get("mmp_roas", 0)
 
         result = {
             "overall_assessment": "",
@@ -536,9 +536,9 @@ class GeminiAdvisor:
         }
 
         # 整体态势
-        if media_roas >= 0.40:
+        if mmp_roas >= 0.40:
             result["overall_assessment"] = "大盘健康，继续保持当前节奏"
-        elif media_roas >= 0.30:
+        elif mmp_roas >= 0.30:
             result["overall_assessment"] = "效率略低，需关注低效计划"
         else:
             result["overall_assessment"] = "效率偏低，建议收缩消耗、优先止损"

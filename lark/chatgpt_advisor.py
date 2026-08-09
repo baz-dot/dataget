@@ -156,7 +156,7 @@ class ChatGPTAdvisor:
 你熟悉的业务指标：
 - ROAS (Return on Ad Spend): 广告回报率，revenue/spend
 - CPI (Cost Per Install): 单次安装成本
-- Media ROAS: 媒体口径 ROAS（media_user_revenue/spend）
+- MMP ROAS: 媒体口径 ROAS（mmp_total_revenue/spend）
 - 止损线：通常 ROAS < 30% 需要关注
 - 健康线：通常 ROAS > 40% 表现良好
 
@@ -233,7 +233,7 @@ class ChatGPTAdvisor:
         optimizer_spend = data.get("optimizer_spend", [])
 
         total_spend = summary.get("total_spend", 0)
-        media_roas = summary.get("media_roas", 0)
+        mmp_roas = summary.get("mmp_roas", 0)
 
         # 计算小时环比 - 优先从 data 中的 prev_hour_summary 获取
         hourly_delta = 0
@@ -250,7 +250,7 @@ class ChatGPTAdvisor:
 
 ### 当前状态
 - 截止当前总消耗: ${total_spend:,.2f}
-- 当前 Media ROAS: {media_roas:.1%}
+- 当前 MMP ROAS: {mmp_roas:.1%}
 - 过去1小时新增消耗: ${hourly_delta:,.2f}
 
 ### 投手消耗情况
@@ -350,10 +350,10 @@ class ChatGPTAdvisor:
     def _fallback_realtime_analysis(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """实时分析降级"""
         summary = data.get("summary", {})
-        media_roas = summary.get("media_roas", 0)
+        mmp_roas = summary.get("mmp_roas", 0)
 
         pace = "正常"
-        if media_roas < 0.30:
+        if mmp_roas < 0.30:
             pace = "效率偏低，关注止损"
 
         return {
@@ -405,7 +405,7 @@ class ChatGPTAdvisor:
 """
         for alert in stop_loss[:5]:
             prompt += f"""- 计划: {alert.get('campaign_name', '')[:30]}
-  剧集: {alert.get('drama_name', '')} | 国家: {alert.get('country', '')}
+  剧集: {alert.get('drama_name', '')} | 国家: {alert.get('country_code', '')}
   消耗: ${alert.get('spend', 0):,.0f} | ROAS: {alert.get('roas', 0):.0%}
   大盘平均: {alert.get('benchmark_roas', 0):.0%}
   系统结论: {alert.get('conclusion', '建议关停')}
@@ -416,7 +416,7 @@ class ChatGPTAdvisor:
 """
         for alert in scale_up[:5]:
             prompt += f"""- 计划: {alert.get('campaign_name', '')[:30]}
-  剧集: {alert.get('drama_name', '')} | 国家: {alert.get('country', '')}
+  剧集: {alert.get('drama_name', '')} | 国家: {alert.get('country_code', '')}
   消耗: ${alert.get('spend', 0):,.0f} | ROAS: {alert.get('roas', 0):.0%}
   大盘平均: {alert.get('benchmark_roas', 0):.0%}
   系统结论: {alert.get('conclusion', '建议加预算')}

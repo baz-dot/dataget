@@ -22,24 +22,24 @@ prev_hour_summary = data.get('prev_hour_summary', {})
 
 total_spend = summary.get('total_spend', 0)
 total_revenue = summary.get('total_media_revenue', 0)
-media_roas = summary.get('media_roas', 0)
+mmp_roas = summary.get('mmp_roas', 0)
 
 prev_total_spend = prev_hour_summary.get('total_spend', 0)
-prev_roas = prev_hour_summary.get('media_roas', 0)
+prev_roas = prev_hour_summary.get('mmp_roas', 0)
 
 # 计算趋势
 hourly_spend_delta = total_spend - prev_total_spend
-roas_trend = media_roas - prev_roas
+roas_trend = mmp_roas - prev_roas
 
 print("=" * 60)
 print("实时战报消息内容模拟")
 print("=" * 60)
 
-print(f"\n🟢 大盘健康：当前 ROAS {media_roas:.1%}")
+print(f"\n🟢 大盘健康：当前 ROAS {mmp_roas:.1%}")
 print("\n⏰ 实时战报")
 print(f"• 截止当前总耗：${total_spend:,.2f}")
 print(f"• 截止当前收入：${total_revenue:,.2f}")
-print(f"• 当前 Media ROAS：{media_roas:.1%}")
+print(f"• 当前 MMP ROAS：{mmp_roas:.1%}")
 
 if prev_total_spend > 0:
     batch_time = data.get('batch_time', '')
@@ -59,7 +59,7 @@ else:
 
 print("\n" + "=" * 60)
 print("调试信息:")
-print(f"  当前 ROAS: {media_roas:.4f}")
+print(f"  当前 ROAS: {mmp_roas:.4f}")
 print(f"  上小时 ROAS: {prev_roas:.4f}")
 print(f"  ROAS 变化: {roas_trend:.4f}")
 print(f"  prev_roas > 0? {prev_roas > 0}")

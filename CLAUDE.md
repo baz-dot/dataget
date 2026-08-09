@@ -5,22 +5,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-这是一个广告数据采集、存储和播报系统,主要服务于短剧出海业务的广告投放监控。系统通过定时采集多个数据源(QuickBI、XMP、DataEye),存储到 BigQuery,并通过飞书机器人进行日报和实时播报。
+这是一个广告数据采集、存储和播报系统,主要服务于短剧出海业务的广告投放监控。广告投放数据来自 QuickBI dbt 数据服务(与看板 [DBT] Marketer Performance 同源同口径),存储到 BigQuery,并通过飞书机器人进行日报和实时播报。素材侧另有 XMP/DataEye 爬虫(独立业务线)。
+
+**铁律: 播报数字必须与看板 https://bi.aliyun.com/product/vigloo.htm?menuId=eaf02d95-131d-4ccc-8b72-496021131956 一致。**
 
 ## 核心架构
 
 ### 三层架构
 
-1. **数据采集层** (Scrapers)
-   - `scraper.py` - XMP 素材数据采集器 (Playwright 自动化)
-   - `dataeye_scraper.py` - DataEye 竞品素材采集器 (海外版 + 国内版)
-   - `xmp/xmp_scheduler.py` - XMP 多渠道数据定时抓取 (TikTok + Meta)
-   - QuickBI API 采集 - 广告投放数据 (通过 Cloud Run Job)
+1. **数据采集层**
+   - `quickbi/dbt_fetcher.py` - **广告数据采集器(主力)**: dbt 数据服务切片拉取 + Agg 校验 + country 归一化
+     - 明细 API `4f9f9ced4bf1` 单次上限 1 万行,一天 6-9 万行,按 投手→+渠道→+剧目 降级切片
+     - 过滤值必须用底层原始值(渠道 `meta` 小写,显示值是 `Meta`)
+     - 聚合 API `dbe6d5561d89` 校验 spend 差异 <0.5% 才落库
+     - overview API `bde60da44aa2` 拉大盘 total_revenue + batched_time(上游停更检测)
+   - `quickbi/test_quickbi.py` - [旧] 旧口径采集器,已停用,留档
+   - `scraper.py` / `dataeye_scraper.py` / `xmp/xmp_scheduler.py` - 素材爬虫(独立业务线)
 
 2. **数据存储层** (BigQuery)
    - `bigquery_storage.py` - BigQuery 数据上传和查询模块
    - 数据集: `quickbi_data`, `xmp_data`, `adx_data`
-   - 核心表: `quickbi_campaigns`, `hourly_snapshots`
+   - 核心表: `dbt_campaigns`, `dbt_overview`, `hourly_snapshots`
+   - 留档表(只读): `quickbi_campaigns`, `quickbi_overview` (旧口径,2026-08 迁移下线)
 
 3. **数据消费层** (Lark Bot)
    - `lark/lark_bot.py` - 飞书机器人播报模块
@@ -30,15 +36,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 调度系统
 
 - `scheduler.py` - 主调度器 (BrainScheduler),整合规则引擎和消息推送
-- `lark/scheduler_local.py` - 本地定时任务调度器
-  - 日报: 每日 09:10 (T-1 日数据)
-  - 实时播报: 每日 09:10-23:10,每小时 10 分
+  - 调度触发时刻用北京时间,**数据日期一律用 KST**(kst_date 口径,日切=北京 23:00,用 `kst_now()`)
+  - 日报: 每日 09:00 (T-1 = KST 昨天)
+  - 实时播报: 每日 09:10-22:10 每小时 (KST 当天)
+  - 收官播报: 每日 23:10 (= KST 00:10,播 KST 昨日全天定稿)
+  - 周报: 每周一 09:30
 
 ### 规则引擎
 
-- `rule_engine.py` - 广告投放规则引擎
-  - 止损预警: Spend > $300 且 ROAS < 30%
-  - 扩量机会: Spend > $300 且 ROAS > 50%
+- `rule_engine.py` - 广告投放规则引擎(**ROAS 一律 mmp_roas 口径** = mmp_total_revenue/spend,对应看板 MMP ROAS 列)
+  - 止损预警: Spend > $300 且 mmp_roas < 30%
+  - 扩量机会: Spend > $300 且 mmp_roas > 50%
   - 素材刷新建议: CTR 下降超过 20%
 
 ## 常用命令
@@ -59,8 +67,15 @@ cp .env.example .env  # 然后编辑 .env 文件
 ### 本地开发
 
 ```bash
-# 运行本地调度器 (日报 + 实时播报)
-python lark/scheduler_local.py
+# 运行本地调度器 (日报 + 实时播报 + 收官 + 周报, 全套定时任务)
+python scheduler.py --mode schedule
+
+# 单次实时播报 (最新 batch, 真实发送到飞书)
+python scheduler.py --mode realtime --latest
+
+# 单次日报 / 周报 (真实发送)
+python scheduler.py --mode daily
+python scheduler.py --mode weekly
 
 # 测试日报播报
 python lark/test_daily_report.py
@@ -75,6 +90,11 @@ python lark/test_chatgpt_advisor.py
 ### 数据采集
 
 ```bash
+# 广告数据采集 (dbt 数据服务, 主力链路)
+python quickbi/dbt_fetcher.py            # 拉取 KST 今天并落库
+python quickbi/dbt_fetcher.py 20260807   # 拉取指定日期
+FETCH_YESTERDAY=true python quickbi/dbt_fetcher.py  # KST 昨天 (日报 T-1)
+
 # 运行 XMP 素材采集
 python scraper.py
 
@@ -115,11 +135,12 @@ python check_yesterday_comparison.py  # 检查昨日对比数据
 
 ### 日报数据流 (Daily Report)
 
-1. **数据查询**: `BigQueryUploader.query_daily_report_data(date=T-1)`
-   - 从 `quickbi_campaigns` 表查询 T-1 日最新 batch 数据
-   - 按投手、剧集、国家维度聚合
+1. **数据查询**: `BigQueryUploader.query_daily_report_data(date=T-1)` (T-1 = KST 昨天)
+   - 从 `dbt_campaigns` 表查询 T-1 日最新 batch 数据
+   - 按投手、剧集、国家维度聚合 (ROAS = mmp_roas)
    - 计算放量剧目 (Spend > $1000, ROAS > 45%)
    - 计算机会市场 (非主投国家, Spend > $100, ROAS > 50%)
+   - 大盘 platform_total_revenue 来自 `dbt_overview` 表
 
 2. **AI 分析**:
    - Gemini AI: 生成策略建议 (`_generate_strategy_insights()`)
@@ -134,22 +155,21 @@ python check_yesterday_comparison.py  # 检查昨日对比数据
 
 ### 实时播报数据流 (Realtime Report)
 
-1. **数据查询**: `BigQueryUploader.query_realtime_report_data()`
-   - 从 `quickbi_campaigns` 表查询当日最新 batch 数据
+1. **数据查询**: `BigQueryUploader.query_realtime_report_data()` (日期 = KST 当天)
+   - 从 `dbt_campaigns` 表查询当日最新 batch 数据
    - 按投手维度聚合，获取 Top 3 主力计划
-   - 筛选止损预警 (Spend > $300, ROAS < 30%)
-   - 筛选扩量机会 (Spend > $300, ROAS > 50%)
+   - 筛选止损预警 (Spend > $300, mmp_roas < 30%)
+   - 筛选扩量机会 (Spend > $300, mmp_roas > 50%)
    - 计算国家边际 ROAS
 
 2. **环比数据**: `BigQueryUploader.get_previous_batch_data()`
    - 查询上一个 batch_id 的数据
    - 计算消耗增量、ROAS 变化、投手增量
 
-3. **数据校验** (在 `scheduler_local.py` 中):
+3. **数据校验** (在 `scheduler.py` 中):
    - 消耗为 0 → 跳过播报
-   - 数据延迟超过 70 分钟 → 跳过播报
-   - 消耗无变化 → 等待 5 分钟重试
-   - 单小时消耗异常 (增量 > $50,000) → 发送告警
+   - 本小时 batch 未就绪 → 等待重试 (最长 10 分钟)
+   - 上游 dbt 停更检测: `dbt_overview.batched_time` (ETL 批次戳) 长时间不更新 → 告警
 
 4. **AI 分析**:
    - ChatGPT: 生成操作建议 (`chatgpt_advisor.analyze_realtime_data()`)
@@ -157,7 +177,7 @@ python check_yesterday_comparison.py  # 检查昨日对比数据
 
 5. **飞书播报**: `LarkBot.send_realtime_report()`
    - 数据延迟警告 (如有)
-   - 实时战报 (总耗、D0 ROAS、新增消耗)
+   - 实时战报 (总耗、MMP ROAS、新增消耗)
    - 谁在花钱 (投手消耗增量、主力计划)
    - 操作建议 (GPT 分析、节奏评估)
    - 整体态势 (AI 止损/扩量建议)
@@ -167,20 +187,29 @@ python check_yesterday_comparison.py  # 检查昨日对比数据
 ### BigQuery 数据结构
 
 **quickbi_campaigns 表** (核心表):
-- `batch_id`: 批次ID (格式: YYYYMMDD_HHMMSS),用于区分不同时间点的数据
-- `stat_date`: 统计日期
-- `campaign_id/name`: 广告系列标识
+- `batch_id`: 批次ID (格式: YYYYMMDD_HHMMSS, **KST 时间**),用于区分不同时间点的数据
+- `kst_date`: 统计日期 (KST 口径,日切=北京 23:00)
+- `campaign_id/name`, `campaign_status`: 广告系列标识与状态 (Active/Stopped)
 - `optimizer`: 投手名称
 - `drama_id/name`: 剧集标识
-- `channel`: 渠道 (google/meta)
-- `country`: 国家/地区
-- `spend/revenue`: 消耗/收入
-- `new_users/new_payers`: 新用户/付费用户
+- `channel`: 渠道 (显示值 Meta/google/tiktok/snapchat/organic/other)
+- `country_code`: 国家 ISO-2 码 (采集时经 `config/country_mapping.py` 归一化); `country_raw` 保留原始英文全名
+- `spend/impression/clicks`: 投放量
+- `new_users_mkt`: 买量新增 (不含自然量)
+- `d24h_payers/d24h_revenue/d24h_ad_revenue`: 24 小时窗口口径
+- `mmp_total_revenue/mmp_sub_revenue/mmp_ad_revenue/mmp_renewal_revenue/mmp_renewals/mmp_sub_purchase`: MMP 归因口径
+
+**核心口径公式** (与看板计算字段逐字一致):
+- `mmp_roas` = mmp_total_revenue / spend  ← **播报和预警的主 ROAS**
+- `d24h_roas` = d24h_revenue / spend
+- `CPI` = spend / new_users_mkt
 
 **关键查询逻辑**:
-- 日报: 查询 T-1 日最新 batch_id 的数据
-- 实时播报: 查询当日最新 batch_id 的数据
+- 日报: 查询 T-1 (KST 昨天) 最新 batch_id 的数据
+- 实时播报: 查询 KST 当日最新 batch_id 的数据
+- 收官播报 (北京 23:10): 查询 KST 昨日最新 batch (全天定稿)
 - 环比: 比较当前 batch_id 和上一个 batch_id
+- 所有"今天/昨天"计算必须用 `kst_now()`, 禁止 `datetime.now()`
 
 ### 飞书机器人消息格式
 
@@ -230,10 +259,15 @@ BQ_DATASET_ID=quickbi_data
 LARK_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 LARK_SECRET=xxx
 
-# QuickBI 配置
-QUICKBI_ACCESS_ID=xxx
-QUICKBI_ACCESS_SECRET=xxx
-QUICKBI_CUBE_ID=xxx
+# 阿里云 AccessKey (QuickBI OpenAPI, RAM 账号需 AliyunQuickBIFullAccess + QuickBI 组织成员)
+ALIYUN_ACCESS_KEY_ID=xxx
+ALIYUN_ACCESS_KEY_SECRET=xxx
+
+# dbt 数据服务 api_id (有默认值, 一般无需配置)
+# DBT_DETAIL_API_ID=4f9f9ced4bf1
+# DBT_AGG_API_ID=dbe6d5561d89
+# DBT_DIMCOUNT_API_ID=43f9a682c64c
+# DBT_OVERVIEW_API_ID=bde60da44aa2
 
 # XMP 配置
 XMP_USERNAME=xxx
@@ -254,16 +288,18 @@ DAILY_REPORT_BI_LINK=https://bi.aliyun.com/xxx
 
 ## 关键业务指标
 
+所有阈值均为 **mmp_roas** 口径 (2026-08 迁移时经 7 天分布验证沿用, 日均触发量: 止损 ~9 条 / 扩量 ~11 条)。
+
 ### ROAS 阈值
-- **绿色 (S级)**: ROAS ≥ 40%
-- **黄色 (效率下滑)**: 30% ≤ ROAS < 40%
-- **红色 (需关注)**: ROAS < 30%
+- **绿色 (S级)**: mmp_roas ≥ 40%
+- **黄色 (效率下滑)**: 30% ≤ mmp_roas < 40%
+- **红色 (需关注)**: mmp_roas < 30%
 
 ### 预警规则
-- **止损预警**: Spend > $300 且 ROAS < 30%
-- **扩量机会**: Spend > $300 且 ROAS > 50%
-- **放量剧目**: Spend > $1000 且 ROAS > 45%
-- **机会市场**: 非主投国家, Spend > $100, ROAS > 50%
+- **止损预警**: Spend > $300 且 mmp_roas < 30%
+- **扩量机会**: Spend > $300 且 mmp_roas > 50%
+- **放量剧目**: Spend > $1000 且 mmp_roas > 45%
+- **机会市场**: 非主投国家, Spend > $100, mmp_roas > 50%
 
 ## 项目文档
 

@@ -108,10 +108,10 @@ top_countries = report_data.get('top_countries', [])
 emerging_markets = report_data.get('emerging_markets', [])
 
 print(f"【主力市场】({len(top_countries)} 个)")
-for country in top_countries[:5]:
-    change = country.get('roas_change', 0)
+for country_code in top_countries[:5]:
+    change = country_code.get('roas_change', 0)
     change_str = f" ({change:+.1%})" if change != 0 else ""
-    print(f"  {country['name']}: ${country['spend']:,.0f} | ROAS {country['roas']:.1%}{change_str}")
+    print(f"  {country_code['name']}: ${country_code['spend']:,.0f} | ROAS {country_code['roas']:.1%}{change_str}")
 
 print(f"\n【新兴机会】({len(emerging_markets)} 个)")
 for market in emerging_markets[:3]:

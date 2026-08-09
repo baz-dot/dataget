@@ -111,7 +111,8 @@ class RuleEngine:
             信号列表，按优先级排序
         """
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            # 数据日期按 KST (dbt kst_date 口径), 不能用本地北京时钟
+            date = (datetime.utcnow() + timedelta(hours=9)).strftime('%Y-%m-%d')
 
         print(f"[RuleEngine] 开始分析 {date} 的数据...")
         self.signals = []
@@ -154,20 +155,20 @@ class RuleEngine:
             campaign_name,
             optimizer,
             channel,
-            country,
+            country_code,
             SUM(spend) as spend,
-            SUM(new_users) as new_users,
-            SUM(new_user_revenue) as revenue,
-            SUM(impressions) as impressions,
+            SUM(new_users_mkt) as new_users_mkt,
+            SUM(d24h_revenue) as revenue,
+            SUM(impression) as impression,
             SUM(clicks) as clicks,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas,
-            SAFE_DIVIDE(SUM(spend), SUM(new_users)) as cpi,
-            SAFE_DIVIDE(SUM(clicks), SUM(impressions)) as ctr,
-            SAFE_DIVIDE(SUM(new_users), SUM(clicks)) as cvr
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas,
+            SAFE_DIVIDE(SUM(spend), SUM(new_users_mkt)) as cpi,
+            SAFE_DIVIDE(SUM(clicks), SUM(impression)) as ctr,
+            SAFE_DIVIDE(SUM(new_users_mkt), SUM(clicks)) as cvr
         FROM `{table_ref}`
-        WHERE stat_date = '{date}'
-          AND status = 'Active'
-        GROUP BY campaign_id, campaign_name, optimizer, channel, country
+        WHERE kst_date = '{date}'
+          AND campaign_status = 'Active'
+        GROUP BY campaign_id, campaign_name, optimizer, channel, country_code
         HAVING spend > 0
         """
 
@@ -180,13 +181,13 @@ class RuleEngine:
                     "campaign_name": row.campaign_name,
                     "optimizer": row.optimizer or "未知",
                     "channel": row.channel,
-                    "country": row.country,
+                    "country_code": row.country_code,
                     "spend": float(row.spend or 0),
-                    "new_users": int(row.new_users or 0),
+                    "new_users_mkt": int(row.new_users_mkt or 0),
                     "revenue": float(row.revenue or 0),
-                    "impressions": int(row.impressions or 0),
+                    "impression": int(row.impression or 0),
                     "clicks": int(row.clicks or 0),
-                    "media_roas": float(row.media_roas or 0),
+                    "mmp_roas": float(row.mmp_roas or 0),
                     "cpi": float(row.cpi or 0),
                     "ctr": float(row.ctr or 0),
                     "cvr": float(row.cvr or 0),
@@ -199,29 +200,29 @@ class RuleEngine:
     def _check_stop_loss(self, campaign: Dict[str, Any]) -> Optional[Signal]:
         """
         策略A: 止损信号检查
-        逻辑: Spend > $30 且 Media ROAS < 10% (或 Revenue = 0)
+        逻辑: Spend > $30 且 MMP ROAS < 10% (或 Revenue = 0)
         """
         spend = campaign["spend"]
-        media_roas = campaign["media_roas"]
+        mmp_roas = campaign["mmp_roas"]
         revenue = campaign["revenue"]
 
         # 检查止损条件
         if spend > self.config.stop_loss_min_spend:
-            if revenue == 0 or media_roas < self.config.stop_loss_max_roas:
+            if revenue == 0 or mmp_roas < self.config.stop_loss_max_roas:
                 return Signal(
                     signal_type=SignalType.STOP_LOSS,
                     priority=SignalPriority.CRITICAL,
                     campaign_id=campaign["campaign_id"],
                     campaign_name=campaign["campaign_name"],
                     optimizer=campaign["optimizer"],
-                    message=f"消耗 ${spend:.2f}，Media ROAS {media_roas:.1%}，收入 ${revenue:.2f}",
+                    message=f"消耗 ${spend:.2f}，MMP ROAS {mmp_roas:.1%}，收入 ${revenue:.2f}",
                     action="立即关停",
                     metrics={
                         "spend": spend,
-                        "media_roas": media_roas,
+                        "mmp_roas": mmp_roas,
                         "revenue": revenue,
                         "channel": campaign["channel"],
-                        "country": campaign["country"]
+                        "country_code": campaign["country_code"]
                     }
                 )
         return None
@@ -229,13 +230,13 @@ class RuleEngine:
     def _check_scale_up(self, campaign: Dict[str, Any]) -> Optional[Signal]:
         """
         策略B: 扩量信号检查
-        逻辑: Media ROAS > 40% 且 Spend > $50 且 CPI < 目标值
+        逻辑: MMP ROAS > 40% 且 Spend > $50 且 CPI < 目标值
         """
         spend = campaign["spend"]
-        media_roas = campaign["media_roas"]
+        mmp_roas = campaign["mmp_roas"]
         cpi = campaign["cpi"]
 
-        if (media_roas > self.config.scale_up_min_roas and
+        if (mmp_roas > self.config.scale_up_min_roas and
             spend > self.config.scale_up_min_spend and
             cpi < self.config.scale_up_target_cpi):
             return Signal(
@@ -244,15 +245,15 @@ class RuleEngine:
                 campaign_id=campaign["campaign_id"],
                 campaign_name=campaign["campaign_name"],
                 optimizer=campaign["optimizer"],
-                message=f"Media ROAS {media_roas:.1%}，CPI ${cpi:.2f}，消耗 ${spend:.2f}",
+                message=f"MMP ROAS {mmp_roas:.1%}，CPI ${cpi:.2f}，消耗 ${spend:.2f}",
                 action="建议预算上调 20% 或复制计划到其他版位",
                 metrics={
                     "spend": spend,
-                    "media_roas": media_roas,
+                    "mmp_roas": mmp_roas,
                     "cpi": cpi,
-                    "new_users": campaign["new_users"],
+                    "new_users_mkt": campaign["new_users_mkt"],
                     "channel": campaign["channel"],
-                    "country": campaign["country"]
+                    "country_code": campaign["country_code"]
                 }
             )
         return None
@@ -263,10 +264,10 @@ class RuleEngine:
         逻辑: 计划ROAS达标，但 CTR 呈下降趋势 (环比昨日下降20%) 或 CTR < 1%
         """
         ctr = campaign["ctr"]
-        media_roas = campaign["media_roas"]
+        mmp_roas = campaign["mmp_roas"]
 
         # 只检查 ROAS 达标的计划
-        if media_roas < self.config.scale_up_min_roas:
+        if mmp_roas < self.config.scale_up_min_roas:
             return None
 
         # 获取昨日 CTR 进行环比
@@ -294,7 +295,7 @@ class RuleEngine:
                     "ctr": ctr,
                     "yesterday_ctr": yesterday_ctr,
                     "ctr_drop": ctr_drop,
-                    "media_roas": media_roas,
+                    "mmp_roas": mmp_roas,
                     "top_materials": top_materials
                 }
             )
@@ -306,9 +307,9 @@ class RuleEngine:
         table_ref = f"{self.project_id}.{self.dataset_id}.{self.table_id}"
 
         query = f"""
-        SELECT SAFE_DIVIDE(SUM(clicks), SUM(impressions)) as ctr
+        SELECT SAFE_DIVIDE(SUM(clicks), SUM(impression)) as ctr
         FROM `{table_ref}`
-        WHERE stat_date = '{yesterday}'
+        WHERE kst_date = '{yesterday}'
           AND campaign_id = '{campaign_id}'
         """
 

@@ -18,7 +18,7 @@ parser.add_argument('--webhook', '-w', type=str, help='指定 Webhook URL')
 parser.add_argument('--secret', '-s', type=str, help='指定签名密钥')
 parser.add_argument('--date', '-d', type=str, help='指定日期 (YYYY-MM-DD)，默认今天')
 parser.add_argument('--latest-batch', '-l', action='store_true', help='使用最新 batch（而非整点 batch）')
-parser.add_argument('--same-day-batch', action='store_true', help='使用同日 batch（batch_id 日期与 stat_date 相同）')
+parser.add_argument('--same-day-batch', action='store_true', help='使用同日 batch（batch_id 日期与 kst_date 相同）')
 args = parser.parse_args()
 
 # 配置 - 优先使用命令行参数
@@ -58,14 +58,14 @@ summary = realtime_data.get('summary', {})
 print(f"\n  大盘总览:")
 print(f"    总消耗: ${summary.get('total_spend', 0):,.2f}")
 print(f"    总收入: ${summary.get('total_revenue', 0):,.2f}")
-print(f"    Media ROAS: {summary.get('media_roas', 0):.2%}")
+print(f"    MMP ROAS: {summary.get('mmp_roas', 0):.2%}")
 
 yesterday_summary = realtime_data.get('yesterday_summary', {})
 if yesterday_summary:
     print(f"\n  前一日同时刻 (日环比基准):")
     print(f"    昨日消耗: ${yesterday_summary.get('total_spend', 0):,.2f}")
     print(f"    昨日收入: ${yesterday_summary.get('total_revenue', 0):,.2f}")
-    print(f"    昨日 ROAS: {yesterday_summary.get('media_roas', 0):.2%}")
+    print(f"    昨日 ROAS: {yesterday_summary.get('mmp_roas', 0):.2%}")
 else:
     print(f"\n  前一日同时刻: 暂无数据")
 
@@ -87,7 +87,7 @@ for camp in scale_up[:3]:
 country_roas = realtime_data.get('country_marginal_roas', [])
 print(f"\n  国家边际ROAS ({len(country_roas)} 个):")
 for c in country_roas[:5]:
-    print(f"    - {c.get('country')}: ROAS {c.get('roas', 0):.2%}")
+    print(f"    - {c.get('country_code')}: ROAS {c.get('roas', 0):.2%}")
 
 # 发送实时播报
 print(f"\n[2] 发送实时播报到飞书...")

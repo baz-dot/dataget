@@ -38,7 +38,7 @@ for alert in alerts_data.get('stop_loss_alerts', [])[:3]:
     print(f"    ROAS: {alert.get('roas', 0):.0%} | 渠道大盘: {alert.get('channel_roas', 0):.0%}")
     details = alert.get('country_details', [])
     if details:
-        print(f"    地区: {', '.join([d['country'] for d in details[:3]])}")
+        print(f"    地区: {', '.join([d['country_code'] for d in details[:3]])}")
 
 print(f"\n扩量机会 ({len(alerts_data.get('scale_up_alerts', []))} 个):")
 for alert in alerts_data.get('scale_up_alerts', [])[:3]:
@@ -46,7 +46,7 @@ for alert in alerts_data.get('scale_up_alerts', [])[:3]:
     print(f"    ROAS: {alert.get('roas', 0):.0%} | 渠道大盘: {alert.get('channel_roas', 0):.0%}")
     details = alert.get('country_details', [])
     if details:
-        print(f"    地区: {', '.join([d['country'] for d in details[:3]])}")
+        print(f"    地区: {', '.join([d['country_code'] for d in details[:3]])}")
 
 # 发送
 if alerts_data.get('stop_loss_alerts') or alerts_data.get('scale_up_alerts'):

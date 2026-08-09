@@ -6,7 +6,7 @@ BigQuery Storage Module
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from google.cloud import bigquery
 from google.api_core import exceptions as gcp_exceptions
@@ -25,6 +25,15 @@ except ImportError:
 
 # 初始化 logger
 logger = get_logger("dataget.bigquery")
+
+
+def kst_now() -> datetime:
+    """KST (UTC+9) 墙上时间, 返回 naive datetime 便于与 batch_id/字符串日期直接运算。
+
+    dbt 数据源的 kst_date 与 batch_id 均为 KST 口径, 所有"今天/昨天/当前小时"计算必须用本函数,
+    不能用 datetime.now() (机器本地时区, 北京 UTC+8, 日切点差 1 小时)。
+    """
+    return datetime.utcnow() + timedelta(hours=9)
 
 
 class BigQueryUploader:
@@ -497,6 +506,149 @@ class BigQueryUploader:
             table.clustering_fields = ["optimizer", "channel"]
             self.client.create_table(table)
             logger.info(f"已创建 XMP 内部 API 表: {table_ref}")
+
+    # ==================== dbt 数据源 (Campaign_Ad_dataset_dbt / Overview_dataset_dbt) ====================
+
+    def _ensure_dbt_campaigns_table_exists(self, table_id: str = "dbt_campaigns"):
+        """确保 dbt campaign 表存在（字段与 dbt 数据集原始命名一致，按 kst_date 分区）"""
+        table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
+
+        schema = [
+            bigquery.SchemaField("kst_date", "DATE"),
+            bigquery.SchemaField("channel", "STRING"),
+            bigquery.SchemaField("country_code", "STRING"),   # 归一化后的 ISO-2 码
+            bigquery.SchemaField("country_raw", "STRING"),    # dbt 原始显示值(英文全名)
+            bigquery.SchemaField("optimizer", "STRING"),
+            bigquery.SchemaField("campaign_status", "STRING"),
+            bigquery.SchemaField("account_id", "STRING"),
+            bigquery.SchemaField("drama_id", "STRING"),
+            bigquery.SchemaField("drama_name", "STRING"),
+            bigquery.SchemaField("campaign_id", "STRING"),
+            bigquery.SchemaField("campaign_name", "STRING"),
+            bigquery.SchemaField("spend", "FLOAT"),
+            bigquery.SchemaField("impression", "FLOAT"),
+            bigquery.SchemaField("clicks", "FLOAT"),
+            bigquery.SchemaField("new_users_mkt", "INTEGER"),
+            bigquery.SchemaField("d24h_payers", "INTEGER"),
+            bigquery.SchemaField("d24h_revenue", "FLOAT"),
+            bigquery.SchemaField("d24h_ad_revenue", "FLOAT"),
+            bigquery.SchemaField("mmp_total_revenue", "FLOAT"),
+            bigquery.SchemaField("mmp_sub_revenue", "FLOAT"),
+            bigquery.SchemaField("mmp_ad_revenue", "FLOAT"),
+            bigquery.SchemaField("mmp_renewal_revenue", "FLOAT"),
+            bigquery.SchemaField("mmp_renewals", "INTEGER"),
+            bigquery.SchemaField("mmp_sub_purchase", "INTEGER"),
+            # 批次追踪字段 (batch_id 用 KST 时间生成)
+            bigquery.SchemaField("batch_id", "STRING"),
+            bigquery.SchemaField("fetched_at", "TIMESTAMP", mode="REQUIRED"),
+        ]
+
+        try:
+            self.client.get_table(table_ref)
+        except Exception:
+            table = bigquery.Table(table_ref, schema=schema)
+            table.time_partitioning = bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.DAY,
+                field="kst_date"
+            )
+            table.clustering_fields = ["optimizer", "drama_name"]
+            self.client.create_table(table)
+            logger.info(f"已创建 dbt campaign 分区表: {table_ref} (按 kst_date 分区)")
+
+    def _ensure_dbt_overview_table_exists(self, table_id: str = "dbt_overview"):
+        """确保 dbt overview 表存在（大盘: 全平台收入/消耗 + 上游 ETL 批次戳）"""
+        table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
+
+        schema = [
+            bigquery.SchemaField("kst_date", "DATE"),
+            bigquery.SchemaField("total_revenue", "FLOAT"),
+            bigquery.SchemaField("spend", "FLOAT"),
+            bigquery.SchemaField("batched_time", "STRING"),  # 上游 dbt ETL 批次戳 'YYYYMMDD HH:MM:SS' (KST)
+            bigquery.SchemaField("batch_id", "STRING"),
+            bigquery.SchemaField("fetched_at", "TIMESTAMP", mode="REQUIRED"),
+        ]
+
+        try:
+            self.client.get_table(table_ref)
+        except Exception:
+            table = bigquery.Table(table_ref, schema=schema)
+            self.client.create_table(table)
+            logger.info(f"已创建 dbt overview 表: {table_ref}")
+
+    def upload_dbt_campaigns(self, rows: List[Dict], table_id: str = "dbt_campaigns", batch_id: str = None) -> int:
+        """
+        上传 dbt campaign 明细到 BigQuery
+
+        Args:
+            rows: dbt_fetcher 归一化后的行 (字段名与表结构一致)
+            table_id: 目标表 ID
+            batch_id: 批次 ID (KST 时间, 格式 YYYYMMDD_HHMMSS)
+
+        Returns:
+            插入的行数
+        """
+        if not rows:
+            logger.warning("没有 dbt campaign 数据需要上传")
+            return 0
+
+        self._ensure_dbt_campaigns_table_exists(table_id)
+
+        fetched_at = datetime.utcnow().isoformat()
+        payload = [{**r, 'batch_id': batch_id, 'fetched_at': fetched_at} for r in rows]
+
+        table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
+        errors = self._insert_rows_with_retry(table_ref, payload)
+        if errors:
+            logger.error(f"dbt_campaigns 插入错误: {errors}")
+            return 0
+
+        logger.info(f"已上传 {len(payload)} 条 dbt campaign 记录到: {table_ref} (batch_id={batch_id})")
+        return len(payload)
+
+    def upload_dbt_overview(self, overview: Dict, table_id: str = "dbt_overview", batch_id: str = None) -> bool:
+        """上传 dbt overview 大盘数据 (每批次一行)"""
+        if not overview:
+            return False
+
+        self._ensure_dbt_overview_table_exists(table_id)
+
+        row = {
+            'kst_date': overview.get('kst_date'),
+            'total_revenue': float(overview.get('total_revenue') or 0),
+            'spend': float(overview.get('spend') or 0),
+            'batched_time': overview.get('batched_time') or '',
+            'batch_id': batch_id,
+            'fetched_at': datetime.utcnow().isoformat(),
+        }
+        table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
+        errors = self._insert_rows_with_retry(table_ref, [row])
+        if errors:
+            logger.error(f"dbt_overview 插入错误: {errors}")
+            return False
+        return True
+
+    def get_upstream_batched_time(self, table_id: str = "dbt_overview") -> Optional[datetime]:
+        """
+        上游 dbt 停更检测: 返回最新采集批次记录的上游 ETL 批次戳 (naive KST datetime)
+
+        batched_time 是上游 dbt 表级 ETL 时间戳 ('YYYYMMDD HH:MM:SS', KST)。
+        采集正常但该值长时间不前进 = 上游停更。查询失败或无数据返回 None。
+        """
+        table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
+        query = f"""
+        SELECT batched_time
+        FROM `{table_ref}`
+        WHERE batched_time != ''
+        ORDER BY batch_id DESC
+        LIMIT 1
+        """
+        try:
+            for row in self.client.query(query).result():
+                return datetime.strptime(row.batched_time, '%Y%m%d %H:%M:%S')
+            return None
+        except Exception as e:
+            logger.warning(f"查询上游 batched_time 失败: {e}")
+            return None
 
     def upload_quickbi_campaigns(self, data: List[Dict], table_id: str = "quickbi_campaigns", batch_id: str = None) -> int:
         """
@@ -1140,7 +1292,7 @@ class BigQueryUploader:
             logger.error(f"查询失败: {e}")
             return None
 
-    def query_quickbi_daily_stats(self, date: str = None, table_id: str = "quickbi_campaigns") -> Dict[str, Any]:
+    def query_quickbi_daily_stats(self, date: str = None, table_id: str = "dbt_campaigns") -> Dict[str, Any]:
         """
         查询 Quick BI 每日汇总统计数据
 
@@ -1152,24 +1304,24 @@ class BigQueryUploader:
             包含汇总数据的字典
         """
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = kst_now().strftime('%Y-%m-%d')
 
         table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
 
         query = f"""
         SELECT
-            stat_date as date,
-            SUM(impressions) as impressions,
+            kst_date as date,
+            SUM(impression) as impression,
             SUM(clicks) as clicks,
             SUM(spend) as cost,
-            SUM(new_users) as new_users,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(clicks), SUM(impressions)) as ctr,
+            SUM(new_users_mkt) as new_users_mkt,
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(clicks), SUM(impression)) as ctr,
             SAFE_DIVIDE(SUM(spend), SUM(clicks)) as cpc,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{date}'
-        GROUP BY stat_date
+        WHERE kst_date = '{date}'
+        GROUP BY kst_date
         """
 
         try:
@@ -1177,10 +1329,10 @@ class BigQueryUploader:
             for row in result:
                 return {
                     "date": str(row.date) if row.date else date,
-                    "impressions": int(row.impressions or 0),
+                    "impression": int(row.impression or 0),
                     "clicks": int(row.clicks or 0),
                     "cost": float(row.cost or 0),
-                    "new_users": int(row.new_users or 0),
+                    "new_users_mkt": int(row.new_users_mkt or 0),
                     "revenue": float(row.revenue or 0),
                     "ctr": float(row.ctr or 0),
                     "cpc": float(row.cpc or 0),
@@ -1188,10 +1340,10 @@ class BigQueryUploader:
                 }
             return {
                 "date": date,
-                "impressions": 0,
+                "impression": 0,
                 "clicks": 0,
                 "cost": 0,
-                "new_users": 0,
+                "new_users_mkt": 0,
                 "revenue": 0,
                 "ctr": 0,
                 "cpc": 0,
@@ -1201,7 +1353,7 @@ class BigQueryUploader:
             logger.error(f"查询失败: {e}")
             return None
 
-    def query_channel_stats(self, date: str = None, table_id: str = "quickbi_campaigns") -> List[Dict[str, Any]]:
+    def query_channel_stats(self, date: str = None, table_id: str = "dbt_campaigns") -> List[Dict[str, Any]]:
         """
         按渠道查询统计数据
 
@@ -1213,21 +1365,21 @@ class BigQueryUploader:
             各渠道统计数据列表
         """
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = kst_now().strftime('%Y-%m-%d')
 
         table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
 
         query = f"""
         SELECT
             channel,
-            SUM(impressions) as impressions,
+            SUM(impression) as impression,
             SUM(clicks) as clicks,
             SUM(spend) as cost,
-            SUM(new_users) as new_users,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(new_users_mkt) as new_users_mkt,
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{date}'
+        WHERE kst_date = '{date}'
         GROUP BY channel
         ORDER BY cost DESC
         """
@@ -1238,10 +1390,10 @@ class BigQueryUploader:
             for row in result:
                 channels.append({
                     "channel": row.channel,
-                    "impressions": int(row.impressions or 0),
+                    "impression": int(row.impression or 0),
                     "clicks": int(row.clicks or 0),
                     "cost": float(row.cost or 0),
-                    "new_users": int(row.new_users or 0),
+                    "new_users_mkt": int(row.new_users_mkt or 0),
                     "revenue": float(row.revenue or 0),
                     "roas": float(row.roas or 0),
                 })
@@ -1272,12 +1424,12 @@ class BigQueryUploader:
 
     # ============ 日报播报数据查询 ============
 
-    def _get_absolute_latest_batch_id(self, table_ref: str, stat_date: str) -> str:
+    def _get_absolute_latest_batch_id(self, table_ref: str, kst_date: str) -> str:
         """获取指定日期的绝对最新 batch_id（不考虑整点逻辑）"""
         query = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{stat_date}'
+        WHERE kst_date = '{kst_date}'
         """
         try:
             for row in self.client.query(query).result():
@@ -1286,14 +1438,14 @@ class BigQueryUploader:
             logger.error(f"查询最新 batch_id 失败: {e}")
         return None
 
-    def _get_same_day_batch_id(self, table_ref: str, stat_date: str) -> str:
-        """获取指定日期的同日 batch_id（batch_id 日期与 stat_date 相同）"""
+    def _get_same_day_batch_id(self, table_ref: str, kst_date: str) -> str:
+        """获取指定日期的同日 batch_id（batch_id 日期与 kst_date 相同）"""
         # batch_id 格式: YYYYMMDD_HHMMSS，取前8位作为日期
-        date_prefix = stat_date.replace('-', '')
+        date_prefix = kst_date.replace('-', '')
         query = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{stat_date}'
+        WHERE kst_date = '{kst_date}'
           AND batch_id LIKE '{date_prefix}%'
         """
         try:
@@ -1303,18 +1455,18 @@ class BigQueryUploader:
             logger.error(f"查询同日 batch_id 失败: {e}")
         return None
 
-    def _get_current_hour_batch_id(self, table_ref: str, stat_date: str) -> str:
+    def _get_current_hour_batch_id(self, table_ref: str, kst_date: str) -> str:
         """获取当前小时 00-20 分钟内的 batch_id，不回退上一小时。"""
         from datetime import datetime
 
-        now = datetime.now()
-        hour_start = f"{stat_date.replace('-', '')}_{now.hour:02d}0000"
-        hour_end = f"{stat_date.replace('-', '')}_{now.hour:02d}2000"
+        now = kst_now()
+        hour_start = f"{kst_date.replace('-', '')}_{now.hour:02d}0000"
+        hour_end = f"{kst_date.replace('-', '')}_{now.hour:02d}2000"
 
         query = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{stat_date}'
+        WHERE kst_date = '{kst_date}'
           AND batch_id >= '{hour_start}'
           AND batch_id < '{hour_end}'
         """
@@ -1327,17 +1479,11 @@ class BigQueryUploader:
             logger.error(f"查询当前小时 batch_id 失败: {e}")
         return None
 
-    def _get_quickbi_bi_batch_filter(self, stat_date: str) -> Optional[tuple]:
-        """获取 BI 对照列使用的 QuickBI 表引用和 batch 过滤条件。"""
-        quickbi_table_ref = f"{self.project_id}.quickbi_data.quickbi_campaigns"
-        batch_id = self._get_latest_batch_id(quickbi_table_ref, stat_date)
-        if not batch_id:
-            logger.warning(f"QuickBI未找到 {stat_date} 的数据")
-            return None
-        batch_filter = f"AND batch_id = '{batch_id}'"
-        return quickbi_table_ref, batch_filter
+    def _get_quickbi_bi_batch_filter(self, kst_date: str) -> Optional[tuple]:
+        """[已废弃] XMP 时代的 BI 对照列。XMP 数据源停用后播报数据即 BI 数据, 无需对照。"""
+        return None
 
-    def _get_latest_batch_id(self, table_ref: str, stat_date: str) -> str:
+    def _get_latest_batch_id(self, table_ref: str, kst_date: str) -> str:
         """
         获取指定日期的最新 batch_id
 
@@ -1346,24 +1492,24 @@ class BigQueryUploader:
 
         Args:
             table_ref: 表引用
-            stat_date: 统计日期 (YYYY-MM-DD)
+            kst_date: 统计日期 (YYYY-MM-DD)
 
         Returns:
             最新的 batch_id，如 20251221_230026
         """
         from datetime import datetime
 
-        now = datetime.now()
+        now = kst_now()
         today = now.strftime('%Y-%m-%d')
 
         # 如果是历史日期，取该日期的最新 batch（包括后续日期抓取的数据）
-        # 注意：QuickBI 的数据是累计数据，今天抓取的数据 stat_date 仍然是昨天
+        # 注意：QuickBI 的数据是累计数据，今天抓取的数据 kst_date 仍然是昨天
         # 所以日报应该取最新的 batch，以获取最完整、最准确的数据
-        if stat_date != today:
+        if kst_date != today:
             query = f"""
             SELECT MAX(batch_id) as latest_batch_id
             FROM `{table_ref}`
-            WHERE stat_date = '{stat_date}'
+            WHERE kst_date = '{kst_date}'
             """
             try:
                 for row in self.client.query(query).result():
@@ -1377,13 +1523,13 @@ class BigQueryUploader:
         current_hour = now.hour
 
         # 1. 查询当前小时 00:00~08:00 窗口的 batch
-        hour_start = f"{stat_date.replace('-', '')}_{current_hour:02d}0000"
-        hour_end = f"{stat_date.replace('-', '')}_{current_hour:02d}0800"
+        hour_start = f"{kst_date.replace('-', '')}_{current_hour:02d}0000"
+        hour_end = f"{kst_date.replace('-', '')}_{current_hour:02d}0800"
 
         query_current = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{stat_date}'
+        WHERE kst_date = '{kst_date}'
           AND batch_id >= '{hour_start}'
           AND batch_id < '{hour_end}'
         """
@@ -1402,7 +1548,7 @@ class BigQueryUploader:
             from datetime import timedelta
             prev_stat_date = (now - timedelta(days=1)).strftime('%Y-%m-%d')
         else:
-            prev_stat_date = stat_date
+            prev_stat_date = kst_date
 
         prev_start = f"{prev_stat_date.replace('-', '')}_{prev_hour:02d}0000"
         prev_end = f"{prev_stat_date.replace('-', '')}_{prev_hour:02d}0800"
@@ -1410,7 +1556,7 @@ class BigQueryUploader:
         query_prev = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{prev_stat_date}'
+        WHERE kst_date = '{prev_stat_date}'
           AND batch_id >= '{prev_start}'
           AND batch_id < '{prev_end}'
         """
@@ -1427,7 +1573,7 @@ class BigQueryUploader:
         query_fallback = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{stat_date}'
+        WHERE kst_date = '{kst_date}'
         """
 
         try:
@@ -1448,7 +1594,7 @@ class BigQueryUploader:
 
         目标：为管理层提供昨天的全盘复盘，辅助战略决策
         - 触发时间：每日 09:00
-        - 取数范围：stat_date = Yesterday (T-1) 的最新批次数据
+        - 取数范围：kst_date = Yesterday (T-1) 的最新批次数据
 
         Args:
             date: 查询日期，格式 YYYY-MM-DD，默认为昨天 (T-1)
@@ -1470,7 +1616,7 @@ class BigQueryUploader:
 
         # 默认查询昨天的数据 (T-1)
         if date is None:
-            date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            date = (kst_now() - timedelta(days=1)).strftime('%Y-%m-%d')
         logger.info(f"查询日期 (T-1): {date}")
 
         # 计算前天日期 (T-2) 用于环比
@@ -1521,22 +1667,22 @@ class BigQueryUploader:
         summary_query = f"""
         SELECT
             SUM(spend) as total_spend,
-            SUM(media_user_revenue) as total_revenue,
-            SUM(COALESCE(media_iap_revenue, 0) + COALESCE(media_sub_revenue, 0) + COALESCE(media_ad_revenue, 0)) as platform_total_revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
+            SUM(mmp_total_revenue) as total_revenue,
+            SUM(mmp_total_revenue) as platform_total_revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
+        WHERE kst_date = '{date}' {batch_filter}
         """
 
         # 2. 大盘总览 (T-2) 用于环比 - 包含平台总营收
         summary_prev_query = f"""
         SELECT
             SUM(spend) as total_spend,
-            SUM(media_user_revenue) as total_revenue,
-            SUM(COALESCE(media_iap_revenue, 0) + COALESCE(media_sub_revenue, 0) + COALESCE(media_ad_revenue, 0)) as platform_total_revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
+            SUM(mmp_total_revenue) as total_revenue,
+            SUM(mmp_total_revenue) as platform_total_revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas
         FROM `{table_ref}`
-        WHERE stat_date = '{day_before}' {batch_filter_prev}
+        WHERE kst_date = '{day_before}' {batch_filter_prev}
         """
 
         # 3. 投手排行榜
@@ -1544,12 +1690,12 @@ class BigQueryUploader:
         SELECT
             optimizer,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas,
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas,
             COUNT(DISTINCT campaign_id) as campaign_count,
             MAX(campaign_name) as top_campaign
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
+        WHERE kst_date = '{date}' {batch_filter}
           AND optimizer IS NOT NULL
           AND optimizer != ''
         GROUP BY optimizer
@@ -1561,10 +1707,10 @@ class BigQueryUploader:
         SELECT
             drama_name,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
+        WHERE kst_date = '{date}' {batch_filter}
           AND drama_name IS NOT NULL
           AND drama_name != ''
         GROUP BY drama_name
@@ -1575,15 +1721,15 @@ class BigQueryUploader:
         # 5. 国家 Top 5
         country_query = f"""
         SELECT
-            country,
+            country_code,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
-          AND country IS NOT NULL
-          AND country != ''
-        GROUP BY country
+        WHERE kst_date = '{date}' {batch_filter}
+          AND country_code IS NOT NULL
+          AND country_code != ''
+        GROUP BY country_code
         ORDER BY spend DESC
         LIMIT 5
         """
@@ -1594,9 +1740,9 @@ class BigQueryUploader:
             SELECT
                 drama_name,
                 SUM(spend) as spend,
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+                SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
             FROM `{table_ref}`
-            WHERE stat_date = '{date}' {batch_filter}
+            WHERE kst_date = '{date}' {batch_filter}
               AND drama_name IS NOT NULL
             GROUP BY drama_name
         )
@@ -1607,18 +1753,18 @@ class BigQueryUploader:
 
         # 7. 机会市场 (Spend > $100 且 ROAS > 50% 且不在主投Top3国家)
         opportunity_query = f"""
-        SELECT drama_name, country, spend, roas FROM (
+        SELECT drama_name, country_code, spend, roas FROM (
             SELECT
                 drama_name,
-                country,
+                country_code,
                 SUM(spend) as spend,
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+                SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
             FROM `{table_ref}`
-            WHERE stat_date = '{date}' {batch_filter}
-              AND country NOT IN ('US', 'KR', 'JP')
+            WHERE kst_date = '{date}' {batch_filter}
+              AND country_code NOT IN ('US', 'KR', 'JP')
               AND drama_name IS NOT NULL
-              AND country IS NOT NULL
-            GROUP BY drama_name, country
+              AND country_code IS NOT NULL
+            GROUP BY drama_name, country_code
         )
         WHERE spend > 100 AND roas > 0.50
         ORDER BY roas DESC
@@ -1630,9 +1776,9 @@ class BigQueryUploader:
         SELECT
             drama_name,
             SUM(spend) as spend,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
+        WHERE kst_date = '{date}' {batch_filter}
           AND drama_name IS NOT NULL
           AND drama_name != ''
         GROUP BY drama_name
@@ -1645,24 +1791,24 @@ class BigQueryUploader:
         SELECT
             drama_name,
             CASE
-                WHEN country IN ('US', 'GB', 'AU', 'CA', 'NZ', 'IE') THEN 'EN'
-                WHEN country IN ('ES', 'MX', 'AR', 'CO', 'PE', 'CL') THEN 'ES'
-                WHEN country IN ('KR') THEN 'KR'
-                WHEN country IN ('JP') THEN 'JP'
-                WHEN country IN ('TW', 'HK', 'MO') THEN 'ZH-TW'
-                WHEN country IN ('DE', 'AT', 'CH') THEN 'DE'
-                WHEN country IN ('FR', 'BE') THEN 'FR'
-                WHEN country IN ('PT', 'BR') THEN 'PT'
-                WHEN country IN ('TH') THEN 'TH'
-                WHEN country IN ('ID') THEN 'ID'
-                WHEN country IN ('VN') THEN 'VN'
+                WHEN country_code IN ('US', 'GB', 'AU', 'CA', 'NZ', 'IE') THEN 'EN'
+                WHEN country_code IN ('ES', 'MX', 'AR', 'CO', 'PE', 'CL') THEN 'ES'
+                WHEN country_code IN ('KR') THEN 'KR'
+                WHEN country_code IN ('JP') THEN 'JP'
+                WHEN country_code IN ('TW', 'HK', 'MO') THEN 'ZH-TW'
+                WHEN country_code IN ('DE', 'AT', 'CH') THEN 'DE'
+                WHEN country_code IN ('FR', 'BE') THEN 'FR'
+                WHEN country_code IN ('PT', 'BR') THEN 'PT'
+                WHEN country_code IN ('TH') THEN 'TH'
+                WHEN country_code IN ('ID') THEN 'ID'
+                WHEN country_code IN ('VN') THEN 'VN'
                 ELSE 'OTHER'
             END as language,
             SUM(spend) as spend
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
+        WHERE kst_date = '{date}' {batch_filter}
           AND drama_name IS NOT NULL
-          AND country IS NOT NULL
+          AND country_code IS NOT NULL
         GROUP BY drama_name, language
         ORDER BY drama_name, spend DESC
         """
@@ -1671,13 +1817,13 @@ class BigQueryUploader:
         drama_country_query = f"""
         SELECT
             drama_name,
-            country,
+            country_code,
             SUM(spend) as spend
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
+        WHERE kst_date = '{date}' {batch_filter}
           AND drama_name IS NOT NULL
-          AND country IS NOT NULL
-        GROUP BY drama_name, country
+          AND country_code IS NOT NULL
+        GROUP BY drama_name, country_code
         ORDER BY drama_name, spend DESC
         """
 
@@ -1694,8 +1840,8 @@ class BigQueryUploader:
                     "total_revenue": float(row.total_revenue or 0),
                     "platform_total_revenue": platform_revenue,
                     "revenue_spend_ratio": revenue_spend_ratio,
-                    "media_roas": float(row.media_roas or 0),
-                    "global_roas": float(row.media_roas or 0)  # 兼容旧字段名
+                    "mmp_roas": float(row.mmp_roas or 0),
+                    "global_roas": float(row.mmp_roas or 0)  # 兼容旧字段名
                 }
 
             # 2. 前一天数据
@@ -1708,8 +1854,8 @@ class BigQueryUploader:
                     "total_revenue": float(row.total_revenue or 0),
                     "platform_total_revenue": prev_platform_revenue,
                     "revenue_spend_ratio": prev_ratio,
-                    "media_roas": float(row.media_roas or 0),
-                    "global_roas": float(row.media_roas or 0)  # 兼容旧字段名
+                    "mmp_roas": float(row.mmp_roas or 0),
+                    "global_roas": float(row.mmp_roas or 0)  # 兼容旧字段名
                 }
 
             # 3. 投手排行
@@ -1739,7 +1885,7 @@ class BigQueryUploader:
             # 5. 国家 Top 5
             for row in self.client.query(country_query).result():
                 result["countries_top5"].append({
-                    "name": row.country,
+                    "name": row.country_code,
                     "spend": float(row.spend or 0),
                     "revenue": float(row.revenue or 0),
                     "roas": float(row.roas or 0)
@@ -1757,7 +1903,7 @@ class BigQueryUploader:
             for row in self.client.query(opportunity_query).result():
                 result["opportunity_markets"].append({
                     "drama_name": row.drama_name,
-                    "country": row.country,
+                    "country_code": row.country_code,
                     "spend": float(row.spend or 0),
                     "roas": float(row.roas or 0)
                 })
@@ -1793,7 +1939,7 @@ class BigQueryUploader:
                     drama_countries[drama] = []
                 if len(drama_countries[drama]) < 3:  # Top 3 国家
                     drama_countries[drama].append({
-                        "country": row.country,
+                        "country_code": row.country_code,
                         "spend": float(row.spend or 0)
                     })
 
@@ -1805,14 +1951,14 @@ class BigQueryUploader:
 
             result["top_dramas_detail"] = top_dramas
 
-            # 9. 从 quickbi_overview 表获取真实的 platform_total_revenue 和 total_spend
+            # 9. 从 dbt_overview 表获取真实的 platform_total_revenue 和 total_spend
             # 注意：overview 表固定在 quickbi_data 数据集中
-            overview_table = f"{self.project_id}.quickbi_data.quickbi_overview"
+            overview_table = f"{self.project_id}.quickbi_data.dbt_overview"
 
             # 9.1 获取 T-1 日的 overview 数据 (revenue + spend)
             overview_query = f"""
-            SELECT total_revenue, total_spend FROM `{overview_table}`
-            WHERE stat_date = '{date}'
+            SELECT total_revenue, spend AS total_spend FROM `{overview_table}`
+            WHERE kst_date = '{date}'
             ORDER BY batch_id DESC
             LIMIT 1
             """
@@ -1833,8 +1979,8 @@ class BigQueryUploader:
 
             # 9.2 获取 T-2 日的 overview 数据 (用于环比)
             overview_prev_query = f"""
-            SELECT total_revenue, total_spend FROM `{overview_table}`
-            WHERE stat_date = '{day_before}'
+            SELECT total_revenue, spend AS total_spend FROM `{overview_table}`
+            WHERE kst_date = '{day_before}'
             ORDER BY batch_id DESC
             LIMIT 1
             """
@@ -1858,10 +2004,10 @@ class BigQueryUploader:
             SELECT
                 channel,
                 SUM(spend) as spend,
-                SUM(media_user_revenue) as revenue,
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+                SUM(mmp_total_revenue) as revenue,
+                SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
             FROM `{table_ref}`
-            WHERE stat_date = '{date}' {batch_filter}
+            WHERE kst_date = '{date}' {batch_filter}
               AND channel IS NOT NULL
               AND channel != ''
             GROUP BY channel
@@ -1889,11 +2035,11 @@ class BigQueryUploader:
 
         目标：为执行层提供"每小时"的监控，发现异动，即时调整
         - 触发时间：每日 9:00 - 24:00，每整点触发
-        - 取数范围：当日累计数据 (stat_date = Today)
+        - 取数范围：当日累计数据 (kst_date = Today)
 
         Args:
             use_latest_batch: 是否使用绝对最新 batch（默认 False，使用整点 batch）
-            use_same_day_batch: 是否使用同日 batch（batch_id 日期与 stat_date 相同）
+            use_same_day_batch: 是否使用同日 batch（batch_id 日期与 kst_date 相同）
             require_current_hour_batch: 是否只接受当前小时 00-20 分钟内的 batch
 
         Returns:
@@ -1908,8 +2054,8 @@ class BigQueryUploader:
             table_id = table_id or config["table_id"]
             dataset_id = dataset_id or config["dataset_id"]
 
-        today = date if date else datetime.now().strftime('%Y-%m-%d')
-        current_hour = datetime.now().strftime('%H:%M')
+        today = date if date else kst_now().strftime('%Y-%m-%d')
+        current_hour = kst_now().strftime('%H:%M')
 
         # 表引用
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
@@ -1950,12 +2096,12 @@ class BigQueryUploader:
         # 解析 batch_id 获取 API 更新时间 (格式: 20251222_103000)
         try:
             batch_time_str = batch_id.replace('_', '')
-            api_update_time = datetime.strptime(batch_time_str, '%Y%m%d%H%M%S')
+            api_update_time = datetime.strptime(batch_time_str, '%Y%m%d%H%M%S')  # batch_id 为 KST 时间
             result["api_update_time"] = api_update_time.strftime('%Y-%m-%d %H:%M:%S')
-            result["batch_time"] = api_update_time.strftime('%H:%M')  # 当前batch时间点
+            result["batch_time"] = api_update_time.strftime('%H:%M')  # 当前batch时间点 (KST)
 
             # 检查数据延迟 - 基于当前小时是否有数据
-            now = datetime.now()
+            now = kst_now()
             current_hour = now.hour
             batch_hour = api_update_time.hour
             current_minute = now.minute
@@ -1983,12 +2129,12 @@ class BigQueryUploader:
         summary_query = f"""
         SELECT
             SUM(spend) as total_spend,
-            SUM(new_user_revenue) as total_revenue,
-            SUM(media_user_revenue) as total_media_revenue,
-            SUM(COALESCE(media_iap_revenue, 0) + COALESCE(media_sub_revenue, 0) + COALESCE(media_ad_revenue, 0)) as platform_total_revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
+            SUM(d24h_revenue) as total_revenue,
+            SUM(mmp_total_revenue) as total_media_revenue,
+            SUM(mmp_total_revenue) as platform_total_revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
+        WHERE kst_date = '{today}' {batch_filter}
         """
 
         # 2. 分投手消耗 (用于归因分析) - 简化查询，避免 STRUCT 问题
@@ -1996,10 +2142,10 @@ class BigQueryUploader:
         SELECT
             optimizer,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
+        WHERE kst_date = '{today}' {batch_filter}
           AND optimizer IS NOT NULL
           AND optimizer != ''
         GROUP BY optimizer
@@ -2012,13 +2158,13 @@ class BigQueryUploader:
             optimizer,
             campaign_name,
             drama_name,
-            country,
+            country_code,
             SUM(spend) as spend
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
+        WHERE kst_date = '{today}' {batch_filter}
           AND optimizer IS NOT NULL
           AND optimizer != ''
-        GROUP BY optimizer, campaign_name, drama_name, country
+        GROUP BY optimizer, campaign_name, drama_name, country_code
         ORDER BY optimizer, spend DESC
         """
 
@@ -2028,9 +2174,9 @@ class BigQueryUploader:
             optimizer,
             channel,
             SUM(spend) as spend,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
+        WHERE kst_date = '{today}' {batch_filter}
           AND optimizer IS NOT NULL
           AND optimizer != ''
           AND channel IS NOT NULL
@@ -2048,9 +2194,9 @@ class BigQueryUploader:
                 optimizer,
                 channel,
                 SUM(spend) as spend,
-                SAFE_DIVIDE(SUM(new_user_revenue), SUM(spend)) as roas
+                SAFE_DIVIDE(SUM(d24h_revenue), SUM(spend)) as roas
             FROM `{quickbi_table_ref}`
-            WHERE stat_date = '{today}' {quickbi_batch_filter}
+            WHERE kst_date = '{today}' {quickbi_batch_filter}
               AND optimizer IS NOT NULL
               AND optimizer != ''
               AND channel IS NOT NULL
@@ -2061,9 +2207,9 @@ class BigQueryUploader:
             optimizer_bi_total_query = f"""
             SELECT
                 optimizer,
-                SAFE_DIVIDE(SUM(new_user_revenue), SUM(spend)) as roas
+                SAFE_DIVIDE(SUM(d24h_revenue), SUM(spend)) as roas
             FROM `{quickbi_table_ref}`
-            WHERE stat_date = '{today}' {quickbi_batch_filter}
+            WHERE kst_date = '{today}' {quickbi_batch_filter}
               AND optimizer IS NOT NULL
               AND optimizer != ''
             GROUP BY optimizer
@@ -2078,10 +2224,10 @@ class BigQueryUploader:
             drama_name,
             channel,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
+        WHERE kst_date = '{today}' {batch_filter}
         GROUP BY campaign_id, campaign_name, optimizer, drama_name, channel
         HAVING spend > 300 AND (revenue = 0 OR SAFE_DIVIDE(revenue, spend) < 0.30)
         ORDER BY spend DESC
@@ -2092,13 +2238,13 @@ class BigQueryUploader:
         stop_loss_country_detail_query = f"""
         SELECT
             campaign_id,
-            country,
+            country_code,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
-        GROUP BY campaign_id, country
+        WHERE kst_date = '{today}' {batch_filter}
+        GROUP BY campaign_id, country_code
         """
 
         # 4. 扩量机会 (Spend > $300 且 ROAS > 50%) - 按 campaign 整体聚合
@@ -2110,10 +2256,10 @@ class BigQueryUploader:
             drama_name,
             channel,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
+        WHERE kst_date = '{today}' {batch_filter}
         GROUP BY campaign_id, campaign_name, optimizer, drama_name, channel
         HAVING spend > 300 AND SAFE_DIVIDE(revenue, spend) > 0.50
         ORDER BY roas DESC
@@ -2123,15 +2269,15 @@ class BigQueryUploader:
         # 5. 分国家边际 ROAS (用于地区观察)
         country_query = f"""
         SELECT
-            country,
+            country_code,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
-          AND country IS NOT NULL
-          AND country != ''
-        GROUP BY country
+        WHERE kst_date = '{today}' {batch_filter}
+          AND country_code IS NOT NULL
+          AND country_code != ''
+        GROUP BY country_code
         HAVING spend > 100
         ORDER BY roas DESC
         """
@@ -2141,10 +2287,10 @@ class BigQueryUploader:
         SELECT
             channel,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
+        WHERE kst_date = '{today}' {batch_filter}
           AND channel IS NOT NULL
         GROUP BY channel
         """
@@ -2152,57 +2298,56 @@ class BigQueryUploader:
         # 5.1.1 分地区分渠道消耗查询
         country_channel_query = f"""
         SELECT
-            country,
+            country_code,
             channel,
             SUM(spend) as spend,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
-          AND country IS NOT NULL
-          AND country != ''
+        WHERE kst_date = '{today}' {batch_filter}
+          AND country_code IS NOT NULL
+          AND country_code != ''
           AND channel IS NOT NULL
-        GROUP BY country, channel
-        ORDER BY country, spend DESC
+        GROUP BY country_code, channel
+        ORDER BY country_code, spend DESC
         """
 
         # 5.2 地区机会雷达 - 高 ROAS 国家的核心驱动剧集
         country_drama_query = f"""
         SELECT
-            country,
+            country_code,
             drama_name,
             SUM(spend) as spend,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
-          AND country IS NOT NULL
+        WHERE kst_date = '{today}' {batch_filter}
+          AND country_code IS NOT NULL
           AND drama_name IS NOT NULL
-        GROUP BY country, drama_name
-        ORDER BY country, spend DESC
+        GROUP BY country_code, drama_name
+        ORDER BY country_code, spend DESC
         """
         #5.3 meta分国家
         meta_country_benchmark_query=f"""
         SELECT
             CASE
-                WHEN UPPER(country) IN ('KR', 'KOR', 'KOREA', 'SOUTH KOREA') THEN 'KR'
+                WHEN UPPER(country_code) IN ('KR', 'KOR', 'KOREA', 'SOUTH KOREA') THEN 'KR'
                 ELSE 'OTHER'
             END as region_group,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' {batch_filter}
+        WHERE kst_date = '{today}' {batch_filter}
           AND LOWER(channel) IN ('meta', 'facebook', 'fb')
-          AND country IS NOT NULL
-          AND country != ''
+          AND country_code IS NOT NULL
+          AND country_code != ''
         GROUP BY region_group
         """
 
         # 6. 前一日同时刻数据 (用于日环比)
         # 目标：找到昨天当前整点的 batch，用于日环比对比
         # 例如：现在 12:30，查找昨天 12:00-12:10 范围内的 batch
-        from datetime import timedelta
-        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-        now = datetime.now()
+        yesterday = (kst_now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        now = kst_now()
         current_hour_int = now.hour
 
         # 查询昨天当前整点的 batch_id（整点前后20分钟范围）
@@ -2213,7 +2358,7 @@ class BigQueryUploader:
         yesterday_batch_query = f"""
         SELECT batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{yesterday}'
+        WHERE kst_date = '{yesterday}'
           AND batch_id >= '{yesterday_hour_start}'
           AND batch_id <= '{yesterday_hour_end}'
         ORDER BY batch_id DESC
@@ -2230,11 +2375,11 @@ class BigQueryUploader:
                 yesterday_summary_query = f"""
                 SELECT
                     SUM(spend) as total_spend,
-                    SUM(new_user_revenue) as total_revenue,
-                    SUM(media_user_revenue) as total_media_revenue,
-                    SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
+                    SUM(d24h_revenue) as total_revenue,
+                    SUM(mmp_total_revenue) as total_media_revenue,
+                    SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas
                 FROM `{table_ref}`
-                WHERE stat_date = '{yesterday}' AND batch_id = '{yesterday_batch_id}'
+                WHERE kst_date = '{yesterday}' AND batch_id = '{yesterday_batch_id}'
                 """
         except Exception as e:
             logger.error(f"查询前一日 batch_id 失败: {e}")
@@ -2243,15 +2388,13 @@ class BigQueryUploader:
         # 目标：计算当前整点到上一整点的差值（如 14:00 - 13:00）
         prev_hour_batch_query = None
         try:
-            from datetime import datetime as dt
-            now = dt.now()
+            now = kst_now()  # 批次为 KST 命名, 小时窗口必须用 KST 时钟
             current_hour = now.hour
             current_date = today
             
             # 上一小时整点（支持跨天）
             prev_hour = (current_hour - 1) % 24
             if current_hour == 0:
-                from datetime import timedelta
                 prev_date = (now - timedelta(days=1)).strftime('%Y-%m-%d')
             else:
                 prev_date = current_date
@@ -2265,7 +2408,7 @@ class BigQueryUploader:
             prev_hour_batch_query = f"""
             SELECT batch_id
             FROM `{table_ref}`
-            WHERE stat_date = '{prev_hour_stat_date}'
+            WHERE kst_date = '{prev_hour_stat_date}'
               AND batch_id >= '{prev_hour_start}'
               AND batch_id <= '{prev_hour_end}'
             ORDER BY batch_id DESC
@@ -2295,11 +2438,11 @@ class BigQueryUploader:
                     prev_hour_summary_query = f"""
                     SELECT
                         SUM(spend) as total_spend,
-                        SUM(new_user_revenue) as total_revenue,
-                        SUM(media_user_revenue) as total_media_revenue,
-                        SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
+                        SUM(d24h_revenue) as total_revenue,
+                        SUM(mmp_total_revenue) as total_media_revenue,
+                        SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas
                     FROM `{table_ref}`
-                    WHERE stat_date = '{prev_hour_stat_date}' AND batch_id = '{prev_batch_id}'
+                    WHERE kst_date = '{prev_hour_stat_date}' AND batch_id = '{prev_batch_id}'
                     """
 
                     prev_hour_optimizer_query = f"""
@@ -2308,7 +2451,7 @@ class BigQueryUploader:
                         channel,
                         SUM(spend) as spend
                     FROM `{table_ref}`
-                    WHERE stat_date = '{prev_hour_stat_date}' AND batch_id = '{prev_batch_id}'
+                    WHERE kst_date = '{prev_hour_stat_date}' AND batch_id = '{prev_batch_id}'
                       AND optimizer IS NOT NULL AND optimizer != ''
                       AND channel IS NOT NULL
                     GROUP BY optimizer, channel
@@ -2331,15 +2474,15 @@ class BigQueryUploader:
                     "total_media_revenue": float(row.total_media_revenue or 0),
                     "platform_total_revenue": platform_revenue,
                     "revenue_spend_ratio": revenue_spend_ratio,
-                    "media_roas": float(row.media_roas or 0)
+                    "mmp_roas": float(row.mmp_roas or 0)
                 }
 
-            # 1.1 从 quickbi_overview 表获取真实的 total_revenue
+            # 1.1 从 dbt_overview 表获取真实的 total_revenue
             # 注意：overview 表固定在 quickbi_data 数据集中
-            overview_table = f"{self.project_id}.quickbi_data.quickbi_overview"
+            overview_table = f"{self.project_id}.quickbi_data.dbt_overview"
             overview_query = f"""
             SELECT total_revenue FROM `{overview_table}`
-            WHERE stat_date = '{today}'
+            WHERE kst_date = '{today}'
             ORDER BY batch_id DESC
             LIMIT 1
             """
@@ -2372,7 +2515,7 @@ class BigQueryUploader:
                     optimizer_campaigns[opt].append({
                         "name": row.campaign_name,
                         "drama_name": row.drama_name,
-                        "country": row.country,
+                        "country_code": row.country_code,
                         "spend": float(row.spend or 0)
                     })
 
@@ -2457,7 +2600,7 @@ class BigQueryUploader:
                 if cid not in campaign_country_details:
                     campaign_country_details[cid] = []
                 campaign_country_details[cid].append({
-                    "country": row.country,
+                    "country_code": row.country_code,
                     "spend": float(row.spend or 0),
                     "roas": float(row.roas or 0)
                 })
@@ -2485,7 +2628,7 @@ class BigQueryUploader:
             # 5. 分国家边际 ROAS
             for row in self.client.query(country_query).result():
                 result["country_marginal_roas"].append({
-                    "country": row.country,
+                    "country_code": row.country_code,
                     "spend": float(row.spend or 0),
                     "revenue": float(row.revenue or 0),
                     "roas": float(row.roas or 0)
@@ -2494,17 +2637,17 @@ class BigQueryUploader:
             # 5.1.1 获取分地区分渠道消耗
             country_channels = {}
             for row in self.client.query(country_channel_query).result():
-                country = row.country
-                if country not in country_channels:
-                    country_channels[country] = {}
-                country_channels[country][row.channel] = {
+                country_code = row.country_code
+                if country_code not in country_channels:
+                    country_channels[country_code] = {}
+                country_channels[country_code][row.channel] = {
                     "spend": float(row.spend or 0),
                     "roas": float(row.roas or 0)
                 }
 
             # 填充 channel_spend 到地区数据
             for country_data in result["country_marginal_roas"]:
-                country_name = country_data["country"]
+                country_name = country_data["country_code"]
                 country_data["channel_spend"] = country_channels.get(country_name, {})
 
             # 5.1 分渠道大盘 ROAS
@@ -2526,11 +2669,11 @@ class BigQueryUploader:
             # 5.2 地区机会雷达 - 获取每个国家的核心驱动剧集
             country_dramas = {}
             for row in self.client.query(country_drama_query).result():
-                country = row.country
-                if country not in country_dramas:
-                    country_dramas[country] = []
-                if len(country_dramas[country]) < 1:  # 只取消耗最高的剧集
-                    country_dramas[country].append({
+                country_code = row.country_code
+                if country_code not in country_dramas:
+                    country_dramas[country_code] = []
+                if len(country_dramas[country_code]) < 1:  # 只取消耗最高的剧集
+                    country_dramas[country_code].append({
                         "drama_name": row.drama_name,
                         "spend": float(row.spend or 0),
                         "roas": float(row.roas or 0)
@@ -2538,17 +2681,17 @@ class BigQueryUploader:
 
             # 筛选高 ROAS 国家 (ROAS > 50%) 作为机会雷达
             for country_data in result["country_marginal_roas"]:
-                country = country_data["country"]
+                country_code = country_data["country_code"]
                 roas = country_data["roas"]
                 spend = country_data["spend"]
                 if roas > 0.50 and spend > 100:
-                    top_drama = country_dramas.get(country, [{}])[0]
+                    top_drama = country_dramas.get(country_code, [{}])[0]
                     drama_name = top_drama.get("drama_name", "")
                     drama_spend = top_drama.get("spend", 0)
                     # 计算该剧在该国的消耗占比
                     drama_ratio = drama_spend / spend if spend > 0 else 0
                     result["region_opportunity_radar"].append({
-                        "country": country,
+                        "country_code": country_code,
                         "roas": roas,
                         "spend": spend,
                         "core_drama": drama_name,
@@ -2566,7 +2709,7 @@ class BigQueryUploader:
                         "total_spend": float(row.total_spend or 0),
                         "total_revenue": float(row.total_revenue or 0),
                         "total_media_revenue": float(row.total_media_revenue or 0),
-                        "media_roas": float(row.media_roas or 0)
+                        "mmp_roas": float(row.mmp_roas or 0)
                     }
 
             # 7. 上一小时数据
@@ -2576,7 +2719,7 @@ class BigQueryUploader:
                         "total_spend": float(row.total_spend or 0),
                         "total_revenue": float(row.total_revenue or 0),
                         "total_media_revenue": float(row.total_media_revenue or 0),
-                        "media_roas": float(row.media_roas or 0)
+                        "mmp_roas": float(row.mmp_roas or 0)
                     }
 
             # 7.1 上一小时分投手数据
@@ -2623,11 +2766,11 @@ class BigQueryUploader:
             table_id = table_id or config["table_id"]
             dataset_id = dataset_id or config["dataset_id"]
 
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = kst_now().strftime('%Y-%m-%d')
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
 
         # 获取当前小时
-        now = datetime.now()
+        now = kst_now()
         current_hour = now.hour
 
         # 计算上一小时
@@ -2648,7 +2791,7 @@ class BigQueryUploader:
         batch_query = f"""
         SELECT MAX(batch_id) as latest_batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{prev_stat_date}'
+        WHERE kst_date = '{prev_stat_date}'
           AND batch_id >= '{prev_hour_start}'
           AND batch_id <= '{prev_hour_end}'
         """
@@ -2678,17 +2821,17 @@ class BigQueryUploader:
             summary_query = f"""
             SELECT
                 SUM(spend) as total_spend,
-                SUM(media_user_revenue) as total_revenue,
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
+                SUM(mmp_total_revenue) as total_revenue,
+                SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas
             FROM `{table_ref}`
-            WHERE stat_date = '{prev_stat_date}' AND batch_id = '{prev_batch_id}'
+            WHERE kst_date = '{prev_stat_date}' AND batch_id = '{prev_batch_id}'
             """
 
-            result = {"total_spend": 0, "media_roas": 0, "optimizer_data": [], "batch_time": batch_time_str, "batch_id": prev_batch_id}
+            result = {"total_spend": 0, "mmp_roas": 0, "optimizer_data": [], "batch_time": batch_time_str, "batch_id": prev_batch_id}
 
             for row in self.client.query(summary_query).result():
                 result["total_spend"] = float(row.total_spend or 0)
-                result["media_roas"] = float(row.media_roas or 0)
+                result["mmp_roas"] = float(row.mmp_roas or 0)
 
             # 查询上一个 batch 的分投手数据
             optimizer_query = f"""
@@ -2696,7 +2839,7 @@ class BigQueryUploader:
                 optimizer,
                 SUM(spend) as spend
             FROM `{table_ref}`
-            WHERE stat_date = '{prev_stat_date}' AND batch_id = '{prev_batch_id}'
+            WHERE kst_date = '{prev_stat_date}' AND batch_id = '{prev_batch_id}'
               AND optimizer IS NOT NULL AND optimizer != ''
             GROUP BY optimizer
             """
@@ -2729,7 +2872,7 @@ class BigQueryUploader:
             table_id = table_id or config["table_id"]
             dataset_id = dataset_id or config["dataset_id"]
 
-        now = datetime.now()
+        now = kst_now()
         yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
         current_hour = now.hour
 
@@ -2739,7 +2882,7 @@ class BigQueryUploader:
         batch_query = f"""
         SELECT batch_id
         FROM `{table_ref}`
-        WHERE stat_date = '{yesterday}'
+        WHERE kst_date = '{yesterday}'
           AND CAST(SUBSTR(batch_id, 10, 2) AS INT64) = {current_hour}
         ORDER BY batch_id DESC
         LIMIT 1
@@ -2759,12 +2902,12 @@ class BigQueryUploader:
             summary_query = f"""
             SELECT
                 SUM(spend) as total_spend,
-                SUM(media_user_revenue) as total_revenue,
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas,
+                SUM(mmp_total_revenue) as total_revenue,
+                SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas,
                 COUNT(DISTINCT optimizer) as optimizer_count,
                 COUNT(DISTINCT campaign_id) as campaign_count
             FROM `{table_ref}`
-            WHERE stat_date = '{yesterday}' AND batch_id = '{batch_id}'
+            WHERE kst_date = '{yesterday}' AND batch_id = '{batch_id}'
             """
 
             result = {
@@ -2772,14 +2915,14 @@ class BigQueryUploader:
                 "hour": current_hour,
                 "batch_id": batch_id,
                 "total_spend": 0,
-                "media_roas": 0,
+                "mmp_roas": 0,
                 "optimizer_count": 0,
                 "campaign_count": 0
             }
 
             for row in self.client.query(summary_query).result():
                 result["total_spend"] = float(row.total_spend or 0)
-                result["media_roas"] = float(row.media_roas or 0)
+                result["mmp_roas"] = float(row.mmp_roas or 0)
                 result["optimizer_count"] = int(row.optimizer_count or 0)
                 result["campaign_count"] = int(row.campaign_count or 0)
 
@@ -2838,7 +2981,7 @@ class BigQueryUploader:
             return {
                 "snapshot_time": row.snapshot_time.isoformat() if row.snapshot_time else None,
                 "total_spend": float(row.total_spend or 0),
-                "media_roas": float(row.d0_roas or 0),
+                "mmp_roas": float(row.d0_roas or 0),
                 "optimizer_count": optimizer_count,
                 "batch_id": row.batch_id
             }
@@ -2872,12 +3015,12 @@ class BigQueryUploader:
 
         # 构建插入数据 (匹配快照表结构)
         row = {
-            "snapshot_time": datetime.now().isoformat(),
-            "stat_date": realtime_data.get("date"),
-            "hour": datetime.now().hour,
+            "snapshot_time": kst_now().isoformat(),
+            "kst_date": realtime_data.get("date"),
+            "hour": kst_now().hour,
             "total_spend": float(summary.get("total_spend", 0)),
             "total_revenue": float(summary.get("total_media_revenue", 0)),
-            "d0_roas": float(summary.get("media_roas", 0)),
+            "d0_roas": float(summary.get("mmp_roas", 0)),
             "optimizer_data": optimizer_data,
             "batch_id": realtime_data.get("batch_id")
         }
@@ -2933,7 +3076,7 @@ class BigQueryUploader:
             dataset_id = dataset_id or config["dataset_id"]
 
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = kst_now().strftime('%Y-%m-%d')
 
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
         batch_id = self._get_latest_batch_id(table_ref, date)
@@ -2955,24 +3098,24 @@ class BigQueryUploader:
         # 1. 全公司平均 ROAS 和 CPM
         overall_query = f"""
         SELECT
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as overall_roas,
-            SAFE_DIVIDE(SUM(spend), SUM(impressions)) * 1000 as overall_cpm
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as overall_roas,
+            SAFE_DIVIDE(SUM(spend), SUM(impression)) * 1000 as overall_cpm
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
+        WHERE kst_date = '{date}' {batch_filter}
         """
 
         # 2. 分剧集+国家的平均 ROAS
         drama_country_query = f"""
         SELECT
             drama_name,
-            country,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as avg_roas,
+            country_code,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as avg_roas,
             SUM(spend) as total_spend
         FROM `{table_ref}`
-        WHERE stat_date = '{date}' {batch_filter}
+        WHERE kst_date = '{date}' {batch_filter}
           AND drama_name IS NOT NULL
-          AND country IS NOT NULL
-        GROUP BY drama_name, country
+          AND country_code IS NOT NULL
+        GROUP BY drama_name, country_code
         HAVING SUM(spend) > 50
         ORDER BY drama_name, total_spend DESC
         """
@@ -2986,10 +3129,10 @@ class BigQueryUploader:
             # 执行分剧集+国家查询
             for row in self.client.query(drama_country_query).result():
                 drama = row.drama_name
-                country = row.country
+                country_code = row.country_code
                 if drama not in result["drama_country_benchmark"]:
                     result["drama_country_benchmark"][drama] = {}
-                result["drama_country_benchmark"][drama][country] = {
+                result["drama_country_benchmark"][drama][country_code] = {
                     "avg_roas": float(row.avg_roas or 0),
                     "total_spend": float(row.total_spend or 0)
                 }
@@ -3000,7 +3143,7 @@ class BigQueryUploader:
             logger.error(f"查询大盘 Benchmark 失败: {e}")
             return result
 
-    def get_drama_country_benchmark(self, drama_name: str, country: str, date: str = None, table_id: str = None, dataset_id: str = None) -> Dict[str, Any]:
+    def get_drama_country_benchmark(self, drama_name: str, country_code: str, date: str = None, table_id: str = None, dataset_id: str = None) -> Dict[str, Any]:
         """
         获取指定剧集在指定国家的大盘平均 ROAS
 
@@ -3008,13 +3151,13 @@ class BigQueryUploader:
 
         Args:
             drama_name: 剧集名称
-            country: 国家代码
+            country_code: 国家代码
             date: 查询日期，默认为今天
 
         Returns:
             {
                 "drama_name": "剧集A",
-                "country": "US",
+                "country_code": "US",
                 "avg_roas": 0.45,
                 "total_spend": 5000,
                 "campaign_count": 10
@@ -3030,14 +3173,14 @@ class BigQueryUploader:
             dataset_id = dataset_id or config["dataset_id"]
 
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = kst_now().strftime('%Y-%m-%d')
 
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
         batch_id = self._get_latest_batch_id(table_ref, date)
 
         result = {
             "drama_name": drama_name,
-            "country": country,
+            "country_code": country_code,
             "avg_roas": 0,
             "total_spend": 0,
             "campaign_count": 0
@@ -3048,14 +3191,14 @@ class BigQueryUploader:
 
         query = f"""
         SELECT
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as avg_roas,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as avg_roas,
             SUM(spend) as total_spend,
             COUNT(DISTINCT campaign_id) as campaign_count
         FROM `{table_ref}`
-        WHERE stat_date = '{date}'
+        WHERE kst_date = '{date}'
           AND batch_id = '{batch_id}'
           AND drama_name = '{drama_name}'
-          AND country = '{country}'
+          AND country_code = '{country_code}'
         """
 
         try:
@@ -3089,7 +3232,7 @@ class BigQueryUploader:
             dataset_id = dataset_id or config["dataset_id"]
 
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = kst_now().strftime('%Y-%m-%d')
 
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
         batch_id = self._get_latest_batch_id(table_ref, date)
@@ -3104,11 +3247,11 @@ class BigQueryUploader:
 
         query = f"""
         SELECT
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as avg_roas,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as avg_roas,
             SUM(spend) as total_spend,
             COUNT(DISTINCT campaign_id) as campaign_count
         FROM `{table_ref}`
-        WHERE stat_date = '{date}'
+        WHERE kst_date = '{date}'
           AND batch_id = '{batch_id}'
           AND drama_name = '{safe_drama_name}'
         """
@@ -3158,8 +3301,8 @@ class BigQueryUploader:
             table_id = table_id or config["table_id"]
             dataset_id = dataset_id or config["dataset_id"]
 
-        today = datetime.now().strftime('%Y-%m-%d')
-        current_hour = datetime.now().hour
+        today = kst_now().strftime('%Y-%m-%d')
+        current_hour = kst_now().hour
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
 
         result = {
@@ -3174,7 +3317,7 @@ class BigQueryUploader:
             target_hour = (current_hour - i) % 24
             # 跨天处理
             if current_hour - i < 0:
-                target_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+                target_date = (kst_now() - timedelta(days=1)).strftime('%Y-%m-%d')
             else:
                 target_date = today
 
@@ -3185,7 +3328,7 @@ class BigQueryUploader:
             batch_query = f"""
             SELECT MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date = '{target_date}'
+            WHERE kst_date = '{target_date}'
               AND batch_id >= '{hour_start}'
               AND batch_id <= '{hour_end}'
             """
@@ -3196,7 +3339,7 @@ class BigQueryUploader:
                         batch_hours.append({
                             "hour": f"{target_hour:02d}:00",
                             "batch_id": row.batch_id,
-                            "stat_date": target_date
+                            "kst_date": target_date
                         })
             except Exception as e:
                 logger.error(f"查询 batch_id 失败: {e}")
@@ -3207,18 +3350,18 @@ class BigQueryUploader:
         # 查询每个小时的投手数据和大盘数据
         for batch_info in batch_hours:
             batch_id = batch_info["batch_id"]
-            stat_date = batch_info["stat_date"]
+            kst_date = batch_info["kst_date"]
             hour_label = batch_info["hour"]
 
             # 投手个人数据
             optimizer_query = f"""
             SELECT
                 SUM(spend) as spend,
-                SUM(media_user_revenue) as revenue,
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas,
-                SAFE_DIVIDE(SUM(spend), SUM(impressions)) * 1000 as cpm
+                SUM(mmp_total_revenue) as revenue,
+                SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas,
+                SAFE_DIVIDE(SUM(spend), SUM(impression)) * 1000 as cpm
             FROM `{table_ref}`
-            WHERE stat_date = '{stat_date}'
+            WHERE kst_date = '{kst_date}'
               AND batch_id = '{batch_id}'
               AND optimizer = '{optimizer_name}'
             """
@@ -3226,10 +3369,10 @@ class BigQueryUploader:
             # 大盘数据
             market_query = f"""
             SELECT
-                SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas,
-                SAFE_DIVIDE(SUM(spend), SUM(impressions)) * 1000 as cpm
+                SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas,
+                SAFE_DIVIDE(SUM(spend), SUM(impression)) * 1000 as cpm
             FROM `{table_ref}`
-            WHERE stat_date = '{stat_date}'
+            WHERE kst_date = '{kst_date}'
               AND batch_id = '{batch_id}'
             """
 
@@ -3268,8 +3411,8 @@ class BigQueryUploader:
         Returns:
             {
                 "optimizer": "kino",
-                "stop_loss_alerts": [{campaign, drama, country, spend, roas, benchmark_roas, conclusion}],
-                "scale_up_alerts": [{campaign, drama, country, spend, roas, benchmark_roas, conclusion}]
+                "stop_loss_alerts": [{campaign, drama, country_code, spend, roas, benchmark_roas, conclusion}],
+                "scale_up_alerts": [{campaign, drama, country_code, spend, roas, benchmark_roas, conclusion}]
             }
         """
         from datetime import datetime
@@ -3281,7 +3424,7 @@ class BigQueryUploader:
             table_id = table_id or config["table_id"]
             dataset_id = dataset_id or config["dataset_id"]
 
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = kst_now().strftime('%Y-%m-%d')
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
         if use_latest_batch:
             batch_id = self._get_absolute_latest_batch_id(table_ref, today)
@@ -3303,10 +3446,10 @@ class BigQueryUploader:
         SELECT
             campaign_id, campaign_name, drama_name, channel,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' AND batch_id = '{batch_id}'
+        WHERE kst_date = '{today}' AND batch_id = '{batch_id}'
           AND optimizer = '{optimizer_name}'
         GROUP BY campaign_id, campaign_name, drama_name, channel
         HAVING spend > 300 AND (revenue = 0 OR SAFE_DIVIDE(revenue, spend) < 0.30)
@@ -3320,10 +3463,10 @@ class BigQueryUploader:
         SELECT
             campaign_id, campaign_name, drama_name, channel,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' AND batch_id = '{batch_id}'
+        WHERE kst_date = '{today}' AND batch_id = '{batch_id}'
           AND optimizer = '{optimizer_name}'
         GROUP BY campaign_id, campaign_name, drama_name, channel
         HAVING spend > 300 AND SAFE_DIVIDE(revenue, spend) > 0.50
@@ -3336,9 +3479,9 @@ class BigQueryUploader:
         SELECT
             channel,
             SUM(spend) as spend,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' AND batch_id = '{batch_id}'
+        WHERE kst_date = '{today}' AND batch_id = '{batch_id}'
           AND channel IS NOT NULL
           AND campaign_name IS NOT NULL
           AND campaign_name != ''
@@ -3350,15 +3493,15 @@ class BigQueryUploader:
         country_detail_query = f"""
         SELECT
             campaign_id,
-            country,
+            country_code,
             SUM(spend) as spend,
-            SUM(media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+            SUM(mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
         FROM `{table_ref}`
-        WHERE stat_date = '{today}' AND batch_id = '{batch_id}'
+        WHERE kst_date = '{today}' AND batch_id = '{batch_id}'
           AND optimizer = '{optimizer_name}'
-          AND country IS NOT NULL
-        GROUP BY campaign_id, country
+          AND country_code IS NOT NULL
+        GROUP BY campaign_id, country_code
         ORDER BY campaign_id, spend DESC
         """
 
@@ -3378,7 +3521,7 @@ class BigQueryUploader:
                 if cid not in campaign_country_details:
                     campaign_country_details[cid] = []
                 campaign_country_details[cid].append({
-                    "country": row.country,
+                    "country_code": row.country_code,
                     "spend": float(row.spend or 0),
                     "roas": float(row.roas or 0)
                 })
@@ -3410,7 +3553,7 @@ class BigQueryUploader:
                 top_country_info = None
                 if top_country:
                     top_country_info = {
-                        "country": top_country["country"],
+                        "country_code": top_country["country_code"],
                         "spend": top_country["spend"],
                         "roas": top_country["roas"],
                         "spend_ratio": top_country["spend"] / spend if spend > 0 else 0
@@ -3461,7 +3604,7 @@ class BigQueryUploader:
                 top_country_info = None
                 if top_country:
                     top_country_info = {
-                        "country": top_country["country"],
+                        "country_code": top_country["country_code"],
                         "spend": top_country["spend"],
                         "roas": top_country["roas"],
                         "spend_ratio": top_country["spend"] / spend if spend > 0 else 0
@@ -3506,7 +3649,7 @@ class BigQueryUploader:
         Returns:
             {
                 "optimizer": "kino",
-                "zombie_alerts": [{campaign, drama, country, spend, roas, last_hour_revenue}]
+                "zombie_alerts": [{campaign, drama, country_code, spend, roas, last_hour_revenue}]
             }
         """
         from datetime import datetime
@@ -3518,7 +3661,7 @@ class BigQueryUploader:
             table_id = table_id or config["table_id"]
             dataset_id = dataset_id or config["dataset_id"]
 
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = kst_now().strftime('%Y-%m-%d')
         table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
 
         # 获取当前和上一小时的 batch_id
@@ -3539,15 +3682,15 @@ class BigQueryUploader:
         # 注意：需要对比当前 batch 和上一 batch 的 revenue 差值
         zombie_query = f"""
         WITH current_data AS (
-            SELECT campaign_id, campaign_name, drama_name, country, status,
+            SELECT campaign_id, campaign_name, drama_name, country_code, campaign_status,
                    SUM(spend) as spend,
-                   SUM(media_user_revenue) as revenue,
-                   SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as roas
+                   SUM(mmp_total_revenue) as revenue,
+                   SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as roas
             FROM `{table_ref}`
-            WHERE stat_date = '{today}' AND batch_id = '{batch_id}'
+            WHERE kst_date = '{today}' AND batch_id = '{batch_id}'
               AND optimizer = '{optimizer_name}'
-              AND status = 'Stopped'
-            GROUP BY campaign_id, campaign_name, drama_name, country, status
+              AND campaign_status = 'Stopped'
+            GROUP BY campaign_id, campaign_name, drama_name, country_code, campaign_status
             HAVING spend > 100 AND SAFE_DIVIDE(revenue, spend) >= 0.40
         )
         SELECT * FROM current_data
@@ -3561,7 +3704,7 @@ class BigQueryUploader:
                     "campaign_id": row.campaign_id,
                     "campaign_name": row.campaign_name,
                     "drama_name": row.drama_name or "",
-                    "country": row.country or "",
+                    "country_code": row.country_code or "",
                     "spend": float(row.spend or 0),
                     "revenue": float(row.revenue or 0),
                     "roas": float(row.roas or 0)
@@ -3600,7 +3743,7 @@ class BigQueryUploader:
 
         # 默认查询上周数据 (W-1)
         if week_start is None or week_end is None:
-            today = datetime.now()
+            today = kst_now()
             # 找到上周一: 本周一 - 7天
             days_since_monday = today.weekday()
             this_monday = today - timedelta(days=days_since_monday)
@@ -3646,73 +3789,73 @@ class BigQueryUploader:
         # 1. 本周大盘汇总 (增加 CPM)
         summary_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{week_start}' AND '{week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{week_start}' AND '{week_end}'
+            GROUP BY kst_date
         )
         SELECT
             SUM(t.spend) as week_total_spend,
-            SUM(t.media_user_revenue) as week_total_revenue,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as week_avg_roas,
-            SAFE_DIVIDE(SUM(t.spend), SUM(t.impressions)) * 1000 as week_avg_cpm,
+            SUM(t.mmp_total_revenue) as week_total_revenue,
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as week_avg_roas,
+            SAFE_DIVIDE(SUM(t.spend), SUM(t.impression)) * 1000 as week_avg_cpm,
             COUNT(DISTINCT t.campaign_id) as total_campaigns
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
         """
 
         # 2. 上周大盘汇总 (环比，增加 CPM)
         prev_summary_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
+            GROUP BY kst_date
         )
         SELECT
             SUM(t.spend) as week_total_spend,
-            SUM(t.media_user_revenue) as week_total_revenue,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as week_avg_roas,
-            AVG(t.cpm) as week_avg_cpm
+            SUM(t.mmp_total_revenue) as week_total_revenue,
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as week_avg_roas,
+            SAFE_DIVIDE(SUM(t.spend), SUM(t.impression)) * 1000 as week_avg_cpm
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
         """
 
         # 3. 日趋势
         daily_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{week_start}' AND '{week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{week_start}' AND '{week_end}'
+            GROUP BY kst_date
         )
         SELECT
-            t.stat_date,
+            t.kst_date,
             SUM(t.spend) as spend,
-            SUM(t.media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as roas
+            SUM(t.mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
-        GROUP BY t.stat_date
-        ORDER BY t.stat_date
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
+        GROUP BY t.kst_date
+        ORDER BY t.kst_date
         """
 
         # 4. 本周投手数据
         optimizer_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{week_start}' AND '{week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{week_start}' AND '{week_end}'
+            GROUP BY kst_date
         )
         SELECT
             t.optimizer,
             SUM(t.spend) as spend,
-            SUM(t.media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as roas,
+            SUM(t.mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas,
             COUNT(DISTINCT t.campaign_id) as campaign_count
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
         WHERE t.optimizer IS NOT NULL AND t.optimizer != ''
         GROUP BY t.optimizer
         ORDER BY spend DESC
@@ -3721,17 +3864,17 @@ class BigQueryUploader:
         # 5. 上周投手数据 (环比)
         prev_optimizer_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
+            GROUP BY kst_date
         )
         SELECT
             t.optimizer,
             SUM(t.spend) as spend,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as roas
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
         WHERE t.optimizer IS NOT NULL AND t.optimizer != ''
         GROUP BY t.optimizer
         """
@@ -3739,18 +3882,18 @@ class BigQueryUploader:
         # 6. 本周剧集数据
         drama_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{week_start}' AND '{week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{week_start}' AND '{week_end}'
+            GROUP BY kst_date
         )
         SELECT
             t.drama_name,
             SUM(t.spend) as spend,
-            SUM(t.media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as roas
+            SUM(t.mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
         WHERE t.drama_name IS NOT NULL AND t.drama_name != ''
         GROUP BY t.drama_name
         ORDER BY spend DESC
@@ -3759,16 +3902,16 @@ class BigQueryUploader:
         # 7. 上周剧集 ROAS (环比)
         prev_drama_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
+            GROUP BY kst_date
         )
         SELECT
             t.drama_name,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as roas
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
         WHERE t.drama_name IS NOT NULL AND t.drama_name != ''
         GROUP BY t.drama_name
         """
@@ -3776,59 +3919,59 @@ class BigQueryUploader:
         # 8. 剧集主投国家 (含消耗和 ROAS)
         drama_country_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{week_start}' AND '{week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{week_start}' AND '{week_end}'
+            GROUP BY kst_date
         )
         SELECT
             t.drama_name,
-            t.country,
+            t.country_code,
             SUM(t.spend) as spend,
-            SUM(t.media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as roas
+            SUM(t.mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
-        WHERE t.drama_name IS NOT NULL AND t.country IS NOT NULL
-        GROUP BY t.drama_name, t.country
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
+        WHERE t.drama_name IS NOT NULL AND t.country_code IS NOT NULL
+        GROUP BY t.drama_name, t.country_code
         ORDER BY t.drama_name, spend DESC
         """
 
         # 9. 本周国家数据
         country_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{week_start}' AND '{week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{week_start}' AND '{week_end}'
+            GROUP BY kst_date
         )
         SELECT
-            t.country,
+            t.country_code,
             SUM(t.spend) as spend,
-            SUM(t.media_user_revenue) as revenue,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as roas
+            SUM(t.mmp_total_revenue) as revenue,
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
-        WHERE t.country IS NOT NULL AND t.country != ''
-        GROUP BY t.country
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
+        WHERE t.country_code IS NOT NULL AND t.country_code != ''
+        GROUP BY t.country_code
         ORDER BY spend DESC
         """
 
         # 10. 上周国家 ROAS (环比)
         prev_country_query = f"""
         WITH daily_batches AS (
-            SELECT stat_date, MAX(batch_id) as batch_id
+            SELECT kst_date, MAX(batch_id) as batch_id
             FROM `{table_ref}`
-            WHERE stat_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
-            GROUP BY stat_date
+            WHERE kst_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
+            GROUP BY kst_date
         )
         SELECT
-            t.country,
-            SAFE_DIVIDE(SUM(t.media_user_revenue), SUM(t.spend)) as roas
+            t.country_code,
+            SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas
         FROM `{table_ref}` t
-        JOIN daily_batches b ON t.stat_date = b.stat_date AND t.batch_id = b.batch_id
-        WHERE t.country IS NOT NULL AND t.country != ''
-        GROUP BY t.country
+        JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
+        WHERE t.country_code IS NOT NULL AND t.country_code != ''
+        GROUP BY t.country_code
         """
 
         try:
@@ -3856,7 +3999,7 @@ class BigQueryUploader:
             # 3. 日趋势
             for row in self.client.query(daily_query).result():
                 result["daily_stats"].append({
-                    "date": str(row.stat_date),
+                    "date": str(row.kst_date),
                     "spend": float(row.spend or 0),
                     "revenue": float(row.revenue or 0),
                     "roas": float(row.roas or 0)
@@ -3899,16 +4042,16 @@ class BigQueryUploader:
 
             # 8. 剧集主投国家 (含消耗和 ROAS)
             drama_countries = {}
-            drama_country_details = {}  # 存储详细数据: {drama: [{country, spend, roas}, ...]}
+            drama_country_details = {}  # 存储详细数据: {drama: [{country_code, spend, roas}, ...]}
             for row in self.client.query(drama_country_query).result():
                 drama = row.drama_name
                 if drama not in drama_countries:
                     drama_countries[drama] = []
                     drama_country_details[drama] = []
                 if len(drama_countries[drama]) < 5:  # 扩展到 Top 5 国家
-                    drama_countries[drama].append(row.country)
+                    drama_countries[drama].append(row.country_code)
                     drama_country_details[drama].append({
-                        "country": row.country,
+                        "country_code": row.country_code,
                         "spend": float(row.spend or 0),
                         "revenue": float(row.revenue or 0),
                         "roas": float(row.roas or 0)
@@ -3947,7 +4090,7 @@ class BigQueryUploader:
             all_countries = []
             for row in self.client.query(country_query).result():
                 all_countries.append({
-                    "name": row.country,
+                    "name": row.country_code,
                     "spend": float(row.spend or 0),
                     "revenue": float(row.revenue or 0),
                     "roas": float(row.roas or 0)
@@ -3955,38 +4098,38 @@ class BigQueryUploader:
 
             # 10. 上周国家 ROAS
             for row in self.client.query(prev_country_query).result():
-                result["prev_country_roas"][row.country] = float(row.roas or 0)
+                result["prev_country_roas"][row.country_code] = float(row.roas or 0)
 
             # 主力市场 Top 5
             main_markets = ["US", "KR", "JP", "TW", "DE"]
-            for country in all_countries[:10]:
-                name = country["name"]
+            for country_code in all_countries[:10]:
+                name = country_code["name"]
                 prev_roas = result["prev_country_roas"].get(name, 0)
-                country["prev_roas"] = prev_roas
-                country["roas_change"] = country["roas"] - prev_roas if prev_roas > 0 else 0
-                result["top_countries"].append(country)
+                country_code["prev_roas"] = prev_roas
+                country_code["roas_change"] = country_code["roas"] - prev_roas if prev_roas > 0 else 0
+                result["top_countries"].append(country_code)
 
             # 新兴机会: 非主投国家，ROAS > 50%
-            for country in all_countries:
-                name = country["name"]
-                if name not in main_markets[:3] and country["roas"] > 0.50 and country["spend"] > 500:
-                    result["emerging_markets"].append(country)
+            for country_code in all_countries:
+                name = country_code["name"]
+                if name not in main_markets[:3] and country_code["roas"] > 0.50 and country_code["spend"] > 500:
+                    result["emerging_markets"].append(country_code)
 
             result["emerging_markets"] = sorted(
                 result["emerging_markets"], key=lambda x: x["roas"], reverse=True
             )[:5]
 
-            # 11. 从 quickbi_overview 表获取真实的周度 revenue
+            # 11. 从 dbt_overview 表获取真实的周度 revenue
             # 注意：overview 表固定在 quickbi_data 数据集中
-            overview_table = f"{self.project_id}.quickbi_data.quickbi_overview"
+            overview_table = f"{self.project_id}.quickbi_data.dbt_overview"
 
             # 11.1 获取本周的 overview revenue (汇总每日)
             week_overview_query = f"""
             WITH daily_overview AS (
-                SELECT stat_date, total_revenue,
-                       ROW_NUMBER() OVER (PARTITION BY stat_date ORDER BY batch_id DESC) as rn
+                SELECT kst_date, total_revenue,
+                       ROW_NUMBER() OVER (PARTITION BY kst_date ORDER BY batch_id DESC) as rn
                 FROM `{overview_table}`
-                WHERE stat_date BETWEEN '{week_start}' AND '{week_end}'
+                WHERE kst_date BETWEEN '{week_start}' AND '{week_end}'
             )
             SELECT SUM(total_revenue) as week_total_revenue
             FROM daily_overview
@@ -4003,10 +4146,10 @@ class BigQueryUploader:
             # 11.2 获取上周的 overview revenue (用于环比)
             prev_week_overview_query = f"""
             WITH daily_overview AS (
-                SELECT stat_date, total_revenue,
-                       ROW_NUMBER() OVER (PARTITION BY stat_date ORDER BY batch_id DESC) as rn
+                SELECT kst_date, total_revenue,
+                       ROW_NUMBER() OVER (PARTITION BY kst_date ORDER BY batch_id DESC) as rn
                 FROM `{overview_table}`
-                WHERE stat_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
+                WHERE kst_date BETWEEN '{prev_week_start}' AND '{prev_week_end}'
             )
             SELECT SUM(total_revenue) as week_total_revenue
             FROM daily_overview

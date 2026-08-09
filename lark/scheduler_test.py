@@ -77,9 +77,9 @@ def run_realtime_report():
 
         summary = realtime_data.get('summary', {})
         total_spend = summary.get('total_spend', 0)
-        media_roas = summary.get('media_roas', 0)
+        mmp_roas = summary.get('mmp_roas', 0)
         print(f"  总消耗: ${total_spend:,.2f}")
-        print(f"  Media ROAS: {media_roas:.2%}")
+        print(f"  MMP ROAS: {mmp_roas:.2%}")
 
         # ========== 数据校验 ==========
         bot = LarkBot(
@@ -131,7 +131,7 @@ def run_realtime_report():
         prev_data = bq.get_previous_batch_data()
         if prev_data:
             prev_spend = prev_data.get('total_spend', 0)
-            prev_roas = prev_data.get('media_roas', 0)
+            prev_roas = prev_data.get('mmp_roas', 0)
             print(f"  上批次消耗: ${prev_spend:,.2f}")
             print(f"  上批次时间: {prev_data.get('batch_time', '未知')}")
 
@@ -147,12 +147,12 @@ def run_realtime_report():
 
             # 5. 检查ROAS是否突变（变化超过50%）
             if prev_roas > 0:
-                roas_change = abs(media_roas - prev_roas) / prev_roas
+                roas_change = abs(mmp_roas - prev_roas) / prev_roas
                 if roas_change > 0.5:
-                    print(f"[校验警告] ROAS突变: {prev_roas:.1%} -> {media_roas:.1%} (变化{roas_change:.0%})")
+                    print(f"[校验警告] ROAS突变: {prev_roas:.1%} -> {mmp_roas:.1%} (变化{roas_change:.0%})")
                     bot.send_alert(
                         alert_type="数据异常",
-                        message=f"ROAS突变: {prev_roas:.1%} -> {media_roas:.1%} (变化{roas_change:.0%})，请关注",
+                        message=f"ROAS突变: {prev_roas:.1%} -> {mmp_roas:.1%} (变化{roas_change:.0%})，请关注",
                         level="warning"
                     )
 

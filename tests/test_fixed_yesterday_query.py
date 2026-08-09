@@ -35,7 +35,7 @@ table_ref = f"{project_id}.quickbi_data.quickbi_campaigns"
 query = f"""
 SELECT batch_id, COUNT(*) as row_count
 FROM `{table_ref}`
-WHERE stat_date = '{yesterday}'
+WHERE kst_date = '{yesterday}'
   AND batch_id >= '{yesterday_hour_start}'
   AND batch_id <= '{yesterday_hour_end}'
 GROUP BY batch_id
@@ -60,18 +60,18 @@ else:
     detail_query = f"""
     SELECT
         SUM(spend) as total_spend,
-        SUM(new_user_revenue) as new_user_revenue,
-        SUM(media_user_revenue) as media_user_revenue,
-        SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
+        SUM(d24h_revenue) as d24h_revenue,
+        SUM(mmp_total_revenue) as mmp_total_revenue,
+        SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas
     FROM `{table_ref}`
-    WHERE stat_date = '{yesterday}'
+    WHERE kst_date = '{yesterday}'
       AND batch_id = '{batch_id}'
     """
 
     detail = list(bq.client.query(detail_query).result())[0]
     print(f"  总消耗: ${detail.total_spend:,.2f}")
-    print(f"  新用户收入: ${detail.new_user_revenue or 0:,.2f}")
-    print(f"  媒体归因收入: ${detail.media_user_revenue or 0:,.2f}")
-    print(f"  Media ROAS: {detail.media_roas or 0:.1%}")
+    print(f"  新用户收入: ${detail.d24h_revenue or 0:,.2f}")
+    print(f"  媒体归因收入: ${detail.mmp_total_revenue or 0:,.2f}")
+    print(f"  MMP ROAS: {detail.mmp_roas or 0:.1%}")
 
 print("\n" + "=" * 60)

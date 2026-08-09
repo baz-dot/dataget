@@ -322,7 +322,7 @@ class LarkBot:
         """
         content = [
             {"label": "📊 监控日期", "value": report_data.get("date", "-")},
-            {"label": "📈 总曝光量", "value": f"{report_data.get('impressions', 0):,}"},
+            {"label": "📈 总曝光量", "value": f"{report_data.get('impression', 0):,}"},
             {"label": "👆 总点击量", "value": f"{report_data.get('clicks', 0):,}"},
             {"label": "💰 总消耗", "value": f"¥{report_data.get('cost', 0):,.2f}"},
             {"label": "📉 CTR", "value": f"{report_data.get('ctr', 0):.2%}"},
@@ -432,8 +432,8 @@ class LarkBot:
         # 添加关键指标
         if metrics.get("spend"):
             content.append({"label": "💰 消耗", "value": f"${metrics['spend']:.2f}"})
-        if metrics.get("media_roas"):
-            content.append({"label": "📈 Media ROAS", "value": f"{metrics['media_roas']:.1%}"})
+        if metrics.get("mmp_roas"):
+            content.append({"label": "📈 MMP ROAS", "value": f"{metrics['mmp_roas']:.1%}"})
 
         # 获取优化师的飞书 ID
         at_user_ids = None
@@ -571,7 +571,7 @@ class LarkBot:
                 - dramas_top5: [{name, spend, roas}]
                 - countries_top5: [{name, spend, roas}]
                 - scale_up_dramas: [{name, spend, roas}] 放量剧目
-                - opportunity_markets: [{drama_name, country, spend, roas}] 机会市场
+                - opportunity_markets: [{drama_name, country_code, spend, roas}] 机会市场
             bi_link: BI 报表链接
         """
         date = data.get("date", time.strftime("%Y-%m-%d"))
@@ -726,7 +726,7 @@ class LarkBot:
                 top_countries = drama.get("top_countries", [])
 
                 lang_str = ", ".join([f"{l['language']}" for l in top_langs[:2]]) if top_langs else "-"
-                country_str = ", ".join([c['country'] for c in top_countries[:3]]) if top_countries else "-"
+                country_str = ", ".join([c['country_code'] for c in top_countries[:3]]) if top_countries else "-"
 
                 elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**{i+1}. 《{name}》**"}})
                 elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"   消耗: {spend_str} | ROAS: {roas:.1%} {roas_mark}"}})
@@ -808,16 +808,16 @@ class LarkBot:
         # 表3: 分国家 Top 5 (使用飞书 table 组件)
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**表3: 分国家 Top 5**"}})
         country_rows = []
-        for country in countries_top5:
+        for country_code in countries_top5:
             country_rows.append({
-                "country": country['name'],
-                "spend": f"${country['spend']:,.0f}",
-                "roas": f"{country['roas']:.1%}"
+                "country_code": country_code['name'],
+                "spend": f"${country_code['spend']:,.0f}",
+                "roas": f"{country_code['roas']:.1%}"
             })
         elements.append({
             "tag": "table",
             "columns": [
-                {"name": "country", "display_name": "国家"},
+                {"name": "country_code", "display_name": "国家"},
                 {"name": "spend", "display_name": "消耗"},
                 {"name": "roas", "display_name": "ROAS"}
             ],
@@ -948,14 +948,14 @@ class LarkBot:
             dc for dc in drama_country
             if dc.get("spend", 0) > 100
             and dc.get("roas", 0) > 0.50
-            and dc.get("country", "") not in top3_countries
+            and dc.get("country_code", "") not in top3_countries
         ]
         opportunity_candidates.sort(key=lambda x: x.get("roas", 0), reverse=True)
 
         if opportunity_candidates:
             dc = opportunity_candidates[0]
             drama_name = dc.get("drama_name", dc.get("name", "未知"))
-            result["opportunity_market"] = f"剧集《{drama_name}》在 [{dc['country']}] ROAS {dc['roas']:.0%}，建议增投"
+            result["opportunity_market"] = f"剧集《{drama_name}》在 [{dc['country_code']}] ROAS {dc['roas']:.0%}，建议增投"
 
         # 3. 测剧建议
         if len(dramas) < 3:
@@ -998,7 +998,7 @@ class LarkBot:
         实时播报降级策略建议（基于规则）
         """
         summary = data.get("summary", {})
-        media_roas = summary.get("media_roas", 0)
+        mmp_roas = summary.get("mmp_roas", 0)
         stop_loss = data.get("stop_loss_campaigns", [])
         scale_up = data.get("scale_up_campaigns", [])
 
@@ -1009,9 +1009,9 @@ class LarkBot:
         }
 
         # 整体态势
-        if media_roas >= 0.40:
+        if mmp_roas >= 0.40:
             result["overall_assessment"] = "大盘健康，继续保持当前节奏"
-        elif media_roas >= 0.30:
+        elif mmp_roas >= 0.30:
             result["overall_assessment"] = "效率略低，需关注低效计划"
         else:
             result["overall_assessment"] = "效率偏低，建议收缩消耗、优先止损"
@@ -1038,7 +1038,7 @@ class LarkBot:
                 - date: 日期
                 - total_spend: 总消耗
                 - spend_change: 消耗环比变化 (如 -0.05 表示 -5%)
-                - media_roas: Media ROAS
+                - mmp_roas: MMP ROAS
                 - roas_target: ROAS 目标
                 - optimizers: 投手数据列表 [{name, spend, roas, new_campaigns, comment}]
                 - warnings: 警示区数据 [{name, spend, roas, suggestion}]
@@ -1047,7 +1047,7 @@ class LarkBot:
         date = data.get("date", time.strftime("%Y-%m-%d"))
         total_spend = data.get("total_spend", 0)
         spend_change = data.get("spend_change", 0)
-        media_roas = data.get("media_roas", 0)
+        mmp_roas = data.get("mmp_roas", 0)
         roas_target = data.get("roas_target", 0.4)
         optimizers = data.get("optimizers", [])
         warnings = data.get("warnings", [])
@@ -1057,12 +1057,12 @@ class LarkBot:
         change_text = f"{change_emoji} 环比 {spend_change:+.0%}"
 
         # ROAS 状态
-        roas_status = "🟢 达标" if media_roas >= roas_target else "🔴 未达标"
+        roas_status = "🟢 达标" if mmp_roas >= roas_target else "🔴 未达标"
 
         elements = [
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**🌍 大盘总览:**"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"• 总消耗: **${total_spend:,.0f}** ({change_text})"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"• Media ROAS: **{media_roas:.0%}** ({roas_status})"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"• MMP ROAS: **{mmp_roas:.0%}** ({roas_status})"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**🏆 投手数据 (按消耗排序):**"}},
         ]
@@ -1265,7 +1265,7 @@ class LarkBot:
                 - drama_name: 剧集名称
                 - campaign_id: Campaign ID
                 - spend: 今日消耗
-                - media_roas: Media ROAS
+                - mmp_roas: MMP ROAS
                 - cpi: CPI
                 - cpi_baseline: CPI 基线
                 - judgment: 模型判断
@@ -1276,7 +1276,7 @@ class LarkBot:
         drama_name = data.get("drama_name", "未知剧集")
         campaign_id = data.get("campaign_id", "")
         spend = data.get("spend", 0)
-        media_roas = data.get("media_roas", 0)
+        mmp_roas = data.get("mmp_roas", 0)
         cpi = data.get("cpi", 0)
         cpi_baseline = data.get("cpi_baseline", 2)
         judgment = data.get("judgment", "消耗已过测试线，且无明显回收，属于赔钱计划。")
@@ -1289,7 +1289,7 @@ class LarkBot:
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**当前数据:**"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"• 今日消耗: **${spend:.2f}**"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"• Media ROAS: **{media_roas:.2%}** (极低)"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"• MMP ROAS: **{mmp_roas:.2%}** (极低)"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"• CPI: **${cpi:.2f}** (高于基线 ${cpi_baseline})"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**模型判断:** {judgment}"}},
@@ -1332,7 +1332,7 @@ class LarkBot:
                 - drama_name: 剧集名称
                 - campaign_id: Campaign ID
                 - spend: 今日消耗
-                - media_roas: Media ROAS
+                - mmp_roas: MMP ROAS
                 - ctr: CTR
                 - competitor_insight: 竞品情报
                 - suggestions: 建议操作列表
@@ -1341,7 +1341,7 @@ class LarkBot:
         drama_name = data.get("drama_name", "未知剧集")
         campaign_id = data.get("campaign_id", "")
         spend = data.get("spend", 0)
-        media_roas = data.get("media_roas", 0)
+        mmp_roas = data.get("mmp_roas", 0)
         ctr = data.get("ctr", 0)
         competitor_insight = data.get("competitor_insight", "")
         suggestions = data.get("suggestions", [])
@@ -1353,7 +1353,7 @@ class LarkBot:
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**当前数据:**"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"• 今日消耗: **${spend:.2f}**"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"• Media ROAS: **{media_roas:.0%}** (优异)"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"• MMP ROAS: **{mmp_roas:.0%}** (优异)"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"• CTR: **{ctr:.1%}**"}},
         ]
 
@@ -1831,7 +1831,7 @@ class LarkBot:
                 if country_details:
                     region_parts = []
                     for cd in country_details[:5]:
-                        c_country = cd.get("country", "-")
+                        c_country = cd.get("country_code", "-")
                         c_spend = cd.get("spend", 0)
                         c_roas = cd.get("roas", 0)
                         if c_spend >= 10000:
@@ -1884,11 +1884,11 @@ class LarkBot:
 
         # 主力市场 - 单行格式避免表格限制
         if top_countries:
-            for country in top_countries[:5]:
-                name = country.get("name", "")
-                spend = country.get("spend", 0)
-                roas = country.get("roas", 0)
-                roas_change = country.get("roas_change", 0)
+            for country_code in top_countries[:5]:
+                name = country_code.get("name", "")
+                spend = country_code.get("spend", 0)
+                roas = country_code.get("roas", 0)
+                roas_change = country_code.get("roas_change", 0)
 
                 if spend >= 10000:
                     spend_str = f"${spend/10000:.1f}w"
@@ -1992,11 +1992,11 @@ class LarkBot:
                 - current_hour: 当前时间
                 - data_delayed: 是否数据延迟
                 - api_update_time: API 最后更新时间
-                - summary: {total_spend, total_revenue, media_roas}
+                - summary: {total_spend, total_revenue, mmp_roas}
                 - optimizer_spend: [{optimizer, spend, roas, top_campaigns}]
                 - stop_loss_campaigns: [{campaign_name, optimizer, spend, roas}]
                 - scale_up_campaigns: [{campaign_name, optimizer, spend, roas}]
-                - country_marginal_roas: [{country, spend, roas}]
+                - country_marginal_roas: [{country_code, spend, roas}]
             prev_data: 上一小时快照数据，用于计算环比
         """
         from config.roas_thresholds import evaluate_realtime_roas_green_status
@@ -2013,7 +2013,7 @@ class LarkBot:
         # 当前值
         total_spend = summary.get("total_spend", 0)
         total_revenue = summary.get("total_media_revenue", 0)  # 改用媒体归因收入
-        media_roas = summary.get("media_roas", 0)
+        mmp_roas = summary.get("mmp_roas", 0)
         platform_total_revenue = summary.get("platform_total_revenue", 0)  # 平台总营收
         revenue_spend_ratio = summary.get("revenue_spend_ratio", 0)  # 收支比
 
@@ -2021,12 +2021,12 @@ class LarkBot:
         yesterday_summary = data.get("yesterday_summary", {})
         yesterday_spend = yesterday_summary.get("total_spend", 0)
         yesterday_revenue = yesterday_summary.get("total_media_revenue", 0)  # 改用媒体归因收入
-        yesterday_media_roas = yesterday_summary.get("media_roas", 0)
+        yesterday_media_roas = yesterday_summary.get("mmp_roas", 0)
 
         # 计算日环比
         daily_spend_change_pct = ((total_spend - yesterday_spend) / yesterday_spend * 100) if yesterday_spend > 0 else 0
         daily_revenue_change_pct = ((total_revenue - yesterday_revenue) / yesterday_revenue * 100) if yesterday_revenue > 0 else 0
-        daily_media_roas_change = media_roas - yesterday_media_roas
+        daily_media_roas_change = mmp_roas - yesterday_media_roas
 
         # 计算小时环比 - 使用 data 中的 prev_hour_summary
         prev_hour_summary = data.get("prev_hour_summary", {})
@@ -2037,16 +2037,16 @@ class LarkBot:
 
         if prev_hour_summary:
             prev_total_spend = prev_hour_summary.get("total_spend", 0)
-            prev_roas = prev_hour_summary.get("media_roas", 0)
+            prev_roas = prev_hour_summary.get("mmp_roas", 0)
             hourly_spend_delta = total_spend - prev_total_spend
-            roas_trend = media_roas - prev_roas
+            roas_trend = mmp_roas - prev_roas
 
         # 如果 prev_data 参数也传了，优先使用（兼容旧调用）
         if prev_data and prev_data.get("total_spend", 0) > 0:
             prev_total_spend = prev_data.get("total_spend", 0)
-            prev_roas = prev_data.get("media_roas", 0)
+            prev_roas = prev_data.get("mmp_roas", 0)
             hourly_spend_delta = total_spend - prev_total_spend
-            roas_trend = media_roas - prev_roas
+            roas_trend = mmp_roas - prev_roas
 
         # 环比百分比
         hourly_spend_change_pct = (hourly_spend_delta / prev_total_spend * 100) if prev_total_spend > 0 else 0
@@ -2064,10 +2064,10 @@ class LarkBot:
         # ========== 板块 1: 小时级异动监控 (Hourly Pulse) ==========
         # 大盘预警状态
         roas_baseline = self.config.get("roas_green_threshold", 0.40)
-        if media_roas < roas_baseline:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🔴 大盘预警：当前 ROAS {media_roas:.1%} (低于基线 {roas_baseline:.0%})**"}})
+        if mmp_roas < roas_baseline:
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🔴 大盘预警：当前 ROAS {mmp_roas:.1%} (低于基线 {roas_baseline:.0%})**"}})
         else:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🟢 大盘健康：当前 ROAS {media_roas:.1%}**"}})
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🟢 大盘健康：当前 ROAS {mmp_roas:.1%}**"}})
         elements.append({"tag": "hr"})
         #新加标准模块：TikTok全区30%，meta整体要求是40%， meta具体到韩区45% 其他区40%
         green_status = evaluate_realtime_roas_green_status(
@@ -2114,12 +2114,12 @@ class LarkBot:
             revenue_daily_str = f" ({revenue_emoji} 日环比 {daily_revenue_change_pct:+.1f}%)"
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 截止当前收入：**${total_revenue:,.2f}**{revenue_daily_str}"}})
 
-        # Media ROAS + 日环比 (使用 media_roas 作为主要 ROAS 指标)
+        # MMP ROAS + 日环比 (使用 mmp_roas 作为主要 ROAS 指标)
         media_roas_daily_str = ""
         if yesterday_media_roas > 0:
             media_roas_emoji = "📈" if daily_media_roas_change > 0 else "📉"
             media_roas_daily_str = f" ({media_roas_emoji} 日环比 {daily_media_roas_change:+.1%})"
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 当前 Media ROAS：**{media_roas:.1%}**{media_roas_daily_str}"}})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 当前 MMP ROAS：**{mmp_roas:.1%}**{media_roas_daily_str}"}})
 
         # 分渠道数据 (TikTok / Meta)
         tiktok_data = channel_benchmark.get("tiktok", {}) or channel_benchmark.get("TikTok", {})
@@ -2177,23 +2177,23 @@ class LarkBot:
         if region_radar:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**🌍 地区机会雷达**"}})
             for region in region_radar:
-                country = region.get("country", "")
+                country_code = region.get("country_code", "")
                 roas = region.get("roas", 0)
                 core_drama = region.get("core_drama", "")
                 drama_ratio = region.get("drama_spend_ratio", 0)
 
                 elements.append({
                     "tag": "div",
-                    "text": {"tag": "lark_md", "content": f"• **{country}**: ROAS 飙升至 **{roas:.0%}** 🔥"}
+                    "text": {"tag": "lark_md", "content": f"• **{country_code}**: ROAS 飙升至 **{roas:.0%}** 🔥"}
                 })
                 if core_drama and drama_ratio > 0.5:
                     elements.append({
                         "tag": "div",
-                        "text": {"tag": "lark_md", "content": f"  核心驱动: 《{core_drama}》(该剧在{country}消耗占比{drama_ratio:.0%})"}
+                        "text": {"tag": "lark_md", "content": f"  核心驱动: 《{core_drama}》(该剧在{country_code}消耗占比{drama_ratio:.0%})"}
                     })
                     elements.append({
                         "tag": "div",
-                        "text": {"tag": "lark_md", "content": f"  建议: 其他投手可尝试在{country}跟投《{core_drama}》"}
+                        "text": {"tag": "lark_md", "content": f"  建议: 其他投手可尝试在{country_code}跟投《{core_drama}》"}
                     })
             elements.append({"tag": "hr"})
 
@@ -2221,15 +2221,15 @@ class LarkBot:
             prev_spend = prev_opt.get("spend", 0) if isinstance(prev_opt, dict) else 0
             delta = current_spend - prev_spend
 
-            # 获取主力计划 (包含 drama 和 country)
+            # 获取主力计划 (包含 drama 和 country_code)
             top_campaigns = opt.get("top_campaigns", [])
             top_camp_info = []
             for c in top_campaigns[:2]:
                 camp_name = c.get("name", "")
                 drama = c.get("drama_name", "")
-                country = c.get("country", "")
-                if drama and country:
-                    top_camp_info.append(f"{drama}({country})")
+                country_code = c.get("country_code", "")
+                if drama and country_code:
+                    top_camp_info.append(f"{drama}({country_code})")
                 elif drama:
                     top_camp_info.append(drama)
                 elif camp_name:
@@ -2287,7 +2287,7 @@ class LarkBot:
                 "total": f"${opt['total']:,.0f}",
                 "tiktok": f"${tiktok_spend:,.0f}({tiktok_roas:.0%})" if tiktok_spend > 0 else "-",
                 "meta": f"${meta_spend:,.0f}({meta_roas:.0%})" if meta_spend > 0 else "-",
-                "media_roas": roas_str,
+                "mmp_roas": roas_str,
                 # "tiktok_bi": _format_spend_roas(tiktok_bi),
                 # "meta_bi": _format_spend_roas(meta_bi),
                 # "roas_bi": f"{bi_roas_val:.1%}" if bi_roas_val else "-",
@@ -2305,7 +2305,7 @@ class LarkBot:
                     {"name": "total", "display_name": "累计"},
                     {"name": "tiktok", "display_name": "TikTok"},
                     {"name": "meta", "display_name": "Meta"},
-                    {"name": "media_roas", "display_name": "ROAS"},
+                    {"name": "mmp_roas", "display_name": "ROAS"},
                     # {"name": "tiktok_bi", "display_name": "TikTok (BI)"},
                     # {"name": "meta_bi", "display_name": "Meta (BI)"},
                     # {"name": "roas_bi", "display_name": "ROAS (BI)"},
@@ -2455,23 +2455,23 @@ class LarkBot:
         if high_roas_countries:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**🌍 地区观察：**"}})
             country_rows = []
-            for country in high_roas_countries[:5]:
+            for country_code in high_roas_countries[:5]:
                 # 分渠道消耗
-                channel_spend = country.get("channel_spend", {})
+                channel_spend = country_code.get("channel_spend", {})
                 tiktok_spend = channel_spend.get("TikTok", {}).get("spend", 0) or channel_spend.get("tiktok", {}).get("spend", 0)
                 meta_spend = channel_spend.get("Meta", {}).get("spend", 0) or channel_spend.get("meta", {}).get("spend", 0) or channel_spend.get("facebook", {}).get("spend", 0)
 
                 country_rows.append({
-                    "country": country.get("country", ""),
-                    "spend": f"${country.get('spend', 0):,.0f}",
+                    "country_code": country_code.get("country_code", ""),
+                    "spend": f"${country_code.get('spend', 0):,.0f}",
                     "tiktok": f"${tiktok_spend:,.0f}" if tiktok_spend > 0 else "-",
                     "meta": f"${meta_spend:,.0f}" if meta_spend > 0 else "-",
-                    "roas": f"{country.get('roas', 0):.0%}"
+                    "roas": f"{country_code.get('roas', 0):.0%}"
                 })
             elements.append({
                 "tag": "table",
                 "columns": [
-                    {"name": "country", "display_name": "国家"},
+                    {"name": "country_code", "display_name": "国家"},
                     {"name": "spend", "display_name": "总消耗"},
                     {"name": "tiktok", "display_name": "TikTok"},
                     {"name": "meta", "display_name": "Meta"},
@@ -2484,9 +2484,9 @@ class LarkBot:
         roas_green = self.config.get("roas_green_threshold", 0.40)
         roas_yellow = self.config.get("roas_yellow_threshold", 0.30)
 
-        if media_roas >= roas_green:
+        if mmp_roas >= roas_green:
             color = "green"
-        elif media_roas >= roas_yellow:
+        elif mmp_roas >= roas_yellow:
             color = "yellow"
         else:
             color = "red"
@@ -2601,8 +2601,8 @@ class LarkBot:
         Args:
             data: 预警数据，包含:
                 - optimizer: 投手名称
-                - stop_loss_alerts: [{campaign_name, drama_name, country, spend, roas, benchmark_roas, conclusion}]
-                - scale_up_alerts: [{campaign_name, drama_name, country, spend, roas, benchmark_roas, conclusion}]
+                - stop_loss_alerts: [{campaign_name, drama_name, country_code, spend, roas, benchmark_roas, conclusion}]
+                - scale_up_alerts: [{campaign_name, drama_name, country_code, spend, roas, benchmark_roas, conclusion}]
         """
         optimizer = data.get("optimizer", "未知")
         stop_loss = data.get("stop_loss_alerts", [])
@@ -2674,7 +2674,7 @@ class LarkBot:
                     tc = top_country
                     elements.append({
                         "tag": "div",
-                        "text": {"tag": "lark_md", "content": f"  **Top国家**: {tc['country']}({tc['spend_ratio']:.0%}) | ${tc['spend']:,.0f} | ROAS {tc['roas']:.0%}"}
+                        "text": {"tag": "lark_md", "content": f"  **Top国家**: {tc['country_code']}({tc['spend_ratio']:.0%}) | ${tc['spend']:,.0f} | ROAS {tc['roas']:.0%}"}
                     })
                 # AI 分析 (按索引匹配)
                 idx = stop_loss.index(alert)
@@ -2742,7 +2742,7 @@ class LarkBot:
                     tc = top_country
                     elements.append({
                         "tag": "div",
-                        "text": {"tag": "lark_md", "content": f"  **Top国家**: {tc['country']}({tc['spend_ratio']:.0%}) | ${tc['spend']:,.0f} | ROAS {tc['roas']:.0%}"}
+                        "text": {"tag": "lark_md", "content": f"  **Top国家**: {tc['country_code']}({tc['spend_ratio']:.0%}) | ${tc['spend']:,.0f} | ROAS {tc['roas']:.0%}"}
                     })
                 # AI 分析 (按索引匹配)
                 idx = scale_up.index(alert)
@@ -2817,7 +2817,7 @@ class LarkBot:
             for z in zombies:
                 campaign = z.get("campaign_name", "")[:30]
                 drama = z.get("drama_name", "")
-                country = z.get("country", "")
+                country_code = z.get("country_code", "")
                 spend = z.get("spend", 0)
                 revenue = z.get("revenue", 0)
                 roas = z.get("roas", 0)
@@ -2828,7 +2828,7 @@ class LarkBot:
                 })
                 elements.append({
                     "tag": "div",
-                    "text": {"tag": "lark_md", "content": f"  剧:《{drama}》| 国家: {country}"}
+                    "text": {"tag": "lark_md", "content": f"  剧:《{drama}》| 国家: {country_code}"}
                 })
                 elements.append({
                     "tag": "div",
@@ -2869,7 +2869,8 @@ class LarkBot:
         """
         if date is None:
             from datetime import datetime, timedelta
-            date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            # 缺失日期按 KST 口径 (dbt kst_date), KST = UTC+9
+            date = (datetime.utcnow() + timedelta(hours=9) - timedelta(days=1)).strftime("%Y-%m-%d")
 
         return self.send_alert(
             alert_type="数据源缺失",
@@ -2938,7 +2939,7 @@ def Daily_Job(webhook_url: str, secret: str = None, data: Dict[str, Any] = None,
             - dramas_top5: [{name, spend, roas}]
             - countries_top5: [{name, spend, roas}]
             - scale_up_dramas: [{name, spend, roas}]
-            - opportunity_markets: [{drama_name, country, spend, roas}]
+            - opportunity_markets: [{drama_name, country_code, spend, roas}]
         bi_link: BI 报表链接
         config: 配置参数（可选）
 
@@ -3033,7 +3034,7 @@ if __name__ == "__main__":
     # 5. 发送市场监控报告
     market_data = {
         "date": "2025-01-15",
-        "impressions": 1500000,
+        "impression": 1500000,
         "clicks": 45000,
         "cost": 12500.50,
         "ctr": 0.03,

@@ -32,14 +32,14 @@ summary = data.get('summary', {})
 print(f"\n当前数据:")
 print(f"  总消耗: ${summary.get('total_spend', 0):,.2f}")
 print(f"  总收入: ${summary.get('total_media_revenue', 0):,.2f}")
-print(f"  Media ROAS: {summary.get('media_roas', 0):.1%}")
+print(f"  MMP ROAS: {summary.get('mmp_roas', 0):.1%}")
 
 # 昨天同整点数据
 yesterday_summary = data.get('yesterday_summary', {})
 print(f"\n昨天同整点数据:")
 print(f"  总消耗: ${yesterday_summary.get('total_spend', 0):,.2f}")
 print(f"  总收入: ${yesterday_summary.get('total_media_revenue', 0):,.2f}")
-print(f"  Media ROAS: {yesterday_summary.get('media_roas', 0):.1%}")
+print(f"  MMP ROAS: {yesterday_summary.get('mmp_roas', 0):.1%}")
 
 # 检查是否有数据
 if yesterday_summary.get('total_spend', 0) == 0:
@@ -63,8 +63,8 @@ else:
                          / yesterday_summary.get('total_media_revenue', 0) * 100)
         print(f"  收入日环比: {revenue_change:+.1f}%")
 
-    if yesterday_summary.get('media_roas', 0) > 0:
-        roas_change = summary.get('media_roas', 0) - yesterday_summary.get('media_roas', 0)
+    if yesterday_summary.get('mmp_roas', 0) > 0:
+        roas_change = summary.get('mmp_roas', 0) - yesterday_summary.get('mmp_roas', 0)
         print(f"  ROAS 日环比: {roas_change:+.1%}")
 
 print("\n" + "=" * 60)

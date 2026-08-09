@@ -36,11 +36,11 @@ query = f"""
 SELECT batch_id,
        COUNT(*) as row_count,
        SUM(spend) as total_spend,
-       SUM(new_user_revenue) as new_user_revenue,
-       SUM(media_user_revenue) as media_user_revenue,
-       SAFE_DIVIDE(SUM(media_user_revenue), SUM(spend)) as media_roas
+       SUM(d24h_revenue) as d24h_revenue,
+       SUM(mmp_total_revenue) as mmp_total_revenue,
+       SAFE_DIVIDE(SUM(mmp_total_revenue), SUM(spend)) as mmp_roas
 FROM `{table_ref}`
-WHERE stat_date = '{yesterday}'
+WHERE kst_date = '{yesterday}'
   AND batch_id >= '{yesterday_hour_start}'
   AND batch_id <= '{yesterday_hour_end}'
 GROUP BY batch_id
@@ -61,8 +61,8 @@ else:
         print(f"\n  batch_id: {row.batch_id}")
         print(f"    行数: {row.row_count}")
         print(f"    总消耗: ${row.total_spend:,.2f}")
-        print(f"    新用户收入: ${row.new_user_revenue or 0:,.2f}")
-        print(f"    媒体归因收入: ${row.media_user_revenue or 0:,.2f}")
-        print(f"    Media ROAS: {row.media_roas or 0:.1%}")
+        print(f"    新用户收入: ${row.d24h_revenue or 0:,.2f}")
+        print(f"    媒体归因收入: ${row.mmp_total_revenue or 0:,.2f}")
+        print(f"    MMP ROAS: {row.mmp_roas or 0:.1%}")
 
 print("\n" + "=" * 60)

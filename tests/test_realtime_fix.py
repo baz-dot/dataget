@@ -21,7 +21,7 @@ if result.get("success"):
     print("验证要点:")
     print("  1. 截止当前总耗 - 应该有日环比")
     print("  2. 截止当前收入 - 应该有日环比")
-    print("  3. 当前 Media ROAS - 应该有日环比")
+    print("  3. 当前 MMP ROAS - 应该有日环比")
 else:
     print(f"\n发送失败: {result.get('error', result.get('reason', '未知'))}")
 

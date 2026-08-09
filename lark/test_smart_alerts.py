@@ -44,10 +44,10 @@ print(f"  止损预警: {len(alerts_data.get('stop_loss_alerts', []))} 条")
 print(f"  扩量机会: {len(alerts_data.get('scale_up_alerts', []))} 条")
 
 for alert in alerts_data.get('stop_loss_alerts', []):
-    print(f"    [STOP] {alert['drama_name']}({alert['country']}): ROAS {alert['roas']:.0%} vs benchmark {alert['benchmark_roas']:.0%}")
+    print(f"    [STOP] {alert['drama_name']}({alert['country_code']}): ROAS {alert['roas']:.0%} vs benchmark {alert['benchmark_roas']:.0%}")
 
 for alert in alerts_data.get('scale_up_alerts', []):
-    print(f"    [SCALE] {alert['drama_name']}({alert['country']}): ROAS {alert['roas']:.0%} vs benchmark {alert['benchmark_roas']:.0%}")
+    print(f"    [SCALE] {alert['drama_name']}({alert['country_code']}): ROAS {alert['roas']:.0%} vs benchmark {alert['benchmark_roas']:.0%}")
 
 # 发送消息
 print(f"\n[2] 发送智能预警...")

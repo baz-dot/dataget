@@ -37,7 +37,7 @@ prev_hour_stat_date = (current_time - timedelta(minutes=60)).strftime('%Y-%m-%d'
 print(f"\n查询参数:")
 print(f"  batch_id >= {one_hour_ago_start}")
 print(f"  batch_id <= {one_hour_ago_end}")
-print(f"  stat_date = {prev_hour_stat_date}")
+print(f"  kst_date = {prev_hour_stat_date}")
 
 # 验证日期
 yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')

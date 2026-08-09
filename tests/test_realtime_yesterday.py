@@ -40,7 +40,7 @@ summary = report_data.get('summary', {})
 print(f"\n  大盘数据:")
 print(f"    总消耗: ${summary.get('total_spend', 0):,.2f}")
 print(f"    总收入: ${summary.get('total_revenue', 0):,.2f}")
-print(f"    Media ROAS: {summary.get('media_roas', 0):.2%}")
+print(f"    MMP ROAS: {summary.get('mmp_roas', 0):.2%}")
 
 # 发送实时播报
 print(f"\n[2] 发送实时播报到飞书...")

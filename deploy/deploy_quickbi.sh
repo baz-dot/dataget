@@ -12,9 +12,8 @@ IMAGE_NAME="gcr.io/${PROJECT_ID}/${JOB_NAME}"
 SERVICE_ACCOUNT="xmp-data-scraper@${PROJECT_ID}.iam.gserviceaccount.com"
 
 # 环境变量
-GCS_BUCKET_NAME="xmp_raw_data_storage"
 BQ_PROJECT_ID="${PROJECT_ID}"
-QUICKBI_BQ_DATASET_ID="quickbi_data"
+BQ_DATASET_ID="quickbi_data"
 
 # 阿里云 QuickBI 凭证 (从环境变量读取)
 ALIYUN_ACCESS_KEY_ID="${ALIYUN_ACCESS_KEY_ID:-}"
@@ -52,9 +51,8 @@ gcloud run jobs create ${JOB_NAME} \
     --cpu 1 \
     --task-timeout 10m \
     --max-retries 2 \
-    --set-env-vars "GCS_BUCKET_NAME=${GCS_BUCKET_NAME}" \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
-    --set-env-vars "QUICKBI_BQ_DATASET_ID=${QUICKBI_BQ_DATASET_ID}" \
+    --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
     --set-env-vars "ALIYUN_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}" \
     --set-env-vars "ALIYUN_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}" \
     --set-env-vars "CLOUD_RUN=true" \
@@ -68,19 +66,18 @@ gcloud run jobs update ${JOB_NAME} \
     --cpu 1 \
     --task-timeout 10m \
     --max-retries 2 \
-    --set-env-vars "GCS_BUCKET_NAME=${GCS_BUCKET_NAME}" \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
-    --set-env-vars "QUICKBI_BQ_DATASET_ID=${QUICKBI_BQ_DATASET_ID}" \
+    --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
     --set-env-vars "ALIYUN_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}" \
     --set-env-vars "ALIYUN_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}" \
     --set-env-vars "CLOUD_RUN=true" \
     --set-env-vars "TZ=Asia/Shanghai" \
     --quiet
 
-echo "=== 5. 创建 Cloud Scheduler 定时任务（每小时整点和03分执行）==="
+echo "=== 5. 创建 Cloud Scheduler 定时任务（每小时03分执行 (batch 落 KST 整点后~5分, 满足播报窗口)）==="
 gcloud scheduler jobs create http ${JOB_NAME}-scheduler \
     --location ${REGION} \
-    --schedule "0,3 * * * *" \
+    --schedule "3 * * * *" \
     --time-zone "Asia/Shanghai" \
     --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
     --http-method POST \
@@ -88,7 +85,7 @@ gcloud scheduler jobs create http ${JOB_NAME}-scheduler \
     --quiet 2>/dev/null || \
 gcloud scheduler jobs update http ${JOB_NAME}-scheduler \
     --location ${REGION} \
-    --schedule "0,3 * * * *" \
+    --schedule "3 * * * *" \
     --time-zone "Asia/Shanghai" \
     --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
     --http-method POST \
@@ -106,9 +103,8 @@ gcloud run jobs create ${DAILY_JOB_NAME} \
     --cpu 1 \
     --task-timeout 10m \
     --max-retries 2 \
-    --set-env-vars "GCS_BUCKET_NAME=${GCS_BUCKET_NAME}" \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
-    --set-env-vars "QUICKBI_BQ_DATASET_ID=${QUICKBI_BQ_DATASET_ID}" \
+    --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
     --set-env-vars "ALIYUN_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}" \
     --set-env-vars "ALIYUN_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}" \
     --set-env-vars "CLOUD_RUN=true" \
@@ -123,9 +119,8 @@ gcloud run jobs update ${DAILY_JOB_NAME} \
     --cpu 1 \
     --task-timeout 10m \
     --max-retries 2 \
-    --set-env-vars "GCS_BUCKET_NAME=${GCS_BUCKET_NAME}" \
     --set-env-vars "BQ_PROJECT_ID=${BQ_PROJECT_ID}" \
-    --set-env-vars "QUICKBI_BQ_DATASET_ID=${QUICKBI_BQ_DATASET_ID}" \
+    --set-env-vars "BQ_DATASET_ID=${BQ_DATASET_ID}" \
     --set-env-vars "ALIYUN_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}" \
     --set-env-vars "ALIYUN_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}" \
     --set-env-vars "CLOUD_RUN=true" \
@@ -133,8 +128,8 @@ gcloud run jobs update ${DAILY_JOB_NAME} \
     --set-env-vars "FETCH_YESTERDAY=true" \
     --quiet
 
-echo "=== 7. 创建凌晨 1 点 T-1 日数据采集调度任务 ==="
-# 这个任务在凌晨 1:00 触发 T-1 Job，采集昨天的数据，确保日报数据完整
+echo "=== 7. 创建凌晨 1 点 T-1 日数据采集调度任务（保底批次）==="
+# 凌晨 1:00 触发 T-1 Job，采集 KST 昨天全天定稿数据，作为日报的保底批次
 gcloud scheduler jobs create http ${DAILY_JOB_NAME}-scheduler \
     --location ${REGION} \
     --schedule "0 1 * * *" \
@@ -146,6 +141,26 @@ gcloud scheduler jobs create http ${DAILY_JOB_NAME}-scheduler \
 gcloud scheduler jobs update http ${DAILY_JOB_NAME}-scheduler \
     --location ${REGION} \
     --schedule "0 1 * * *" \
+    --time-zone "Asia/Shanghai" \
+    --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${DAILY_JOB_NAME}:run" \
+    --http-method POST \
+    --oauth-service-account-email ${SERVICE_ACCOUNT} \
+    --quiet
+
+echo "=== 8. 创建早晨 8:40 T-1 数据重拉调度任务（日报前取最新归因）==="
+# MMP 归因收入在日切后仍持续回传 (~0.39% 迟到归因), 08:40 重拉 T-1 保证 09:00 日报与看板同批次
+# 实测采集耗时 2.5~4 分钟, task-timeout 10m, 最晚 08:50 结束, 09:00 前必有结果
+gcloud scheduler jobs create http ${DAILY_JOB_NAME}-morning-scheduler \
+    --location ${REGION} \
+    --schedule "40 8 * * *" \
+    --time-zone "Asia/Shanghai" \
+    --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${DAILY_JOB_NAME}:run" \
+    --http-method POST \
+    --oauth-service-account-email ${SERVICE_ACCOUNT} \
+    --quiet 2>/dev/null || \
+gcloud scheduler jobs update http ${DAILY_JOB_NAME}-morning-scheduler \
+    --location ${REGION} \
+    --schedule "40 8 * * *" \
     --time-zone "Asia/Shanghai" \
     --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${DAILY_JOB_NAME}:run" \
     --http-method POST \
