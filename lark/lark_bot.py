@@ -13,6 +13,16 @@ import os
 import sys
 from typing import Optional, List, Dict, Any
 
+
+def dual_time_label(kst_hhmm: str) -> str:
+    """KST 'HH:MM' -> '北京 HH:MM · KST HH:MM' 双时区标签 (北京 = KST - 1h)"""
+    try:
+        h, m = kst_hhmm.split(':')
+        bj_h = (int(h) - 1) % 24
+        return f"{bj_h:02d}:{m} · KST {kst_hhmm}"
+    except (ValueError, AttributeError):
+        return kst_hhmm
+
 # 导入日志模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 try:
@@ -2152,7 +2162,7 @@ class LarkBot:
         if prev_total_spend > 0 and not data_delayed:
             current_batch_time = data.get("batch_time", "")
             prev_batch_time = data.get("prev_batch_time", "")
-            time_label = f"({current_batch_time} vs {prev_batch_time})" if current_batch_time and prev_batch_time else ""
+            time_label = f"(KST {current_batch_time} vs {prev_batch_time})" if current_batch_time and prev_batch_time else ""
             spend_emoji = "🔥" if hourly_spend_change_pct > 10 else "📊"
             elements.append({
                 "tag": "div",
@@ -2496,7 +2506,7 @@ class LarkBot:
             "msg_type": "interactive",
             "card": {
                 "header": {
-                    "title": {"tag": "plain_text", "content": f"⏰ 实时战报 [{current_hour}]"},
+                    "title": {"tag": "plain_text", "content": f"⏰ 实时战报 [{dual_time_label(current_hour)}]"},
                     "template": color
                 },
                 "elements": elements
