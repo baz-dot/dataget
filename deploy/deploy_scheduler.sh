@@ -1,5 +1,6 @@
 #!/bin/bash
 # Cloud Run 部署脚本 - Lark 播报调度器
+set -euo pipefail
 
 # 配置变量
 PROJECT_ID="fleet-blend-469520-n7"
@@ -14,7 +15,8 @@ cd "$(dirname "$0")/.."
 
 # 1. 构建 Docker 镜像
 echo "步骤 1: 构建 Docker 镜像..."
-docker build -f deploy/Dockerfile.scheduler -t ${IMAGE_NAME} .
+# provenance/sbom 会产出 OCI image index, Cloud Run 不支持; 必须纯 amd64 manifest
+docker build --provenance=false --sbom=false --platform linux/amd64 -f deploy/Dockerfile.scheduler -t ${IMAGE_NAME} .
 
 # 2. 推送镜像到 Google Container Registry
 echo "步骤 2: 推送镜像到 GCR..."
