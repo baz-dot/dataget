@@ -1707,7 +1707,7 @@ class LarkBot:
         elements.append({"tag": "hr"})
 
     def _add_weekly_optimizer_section(self, elements: list, optimizer_weekly: list):
-        """添加投手周度排行板块 - 按团队分组"""
+        """添加投手周度排行板块 - 全员榜单(本周实际投放人员), 未投放沉底"""
         if not optimizer_weekly:
             return
 
@@ -1716,27 +1716,18 @@ class LarkBot:
         roas_green = self.config.get("roas_green_threshold", 0.40)
         roas_yellow = self.config.get("roas_yellow_threshold", 0.30)
 
-        # 按团队分组
-        cn_optimizers = []
-        kr_optimizers = []
-        for opt in optimizer_weekly:
-            team = get_optimizer_team(opt.get("name", ""))
-            if team == "CN":
-                cn_optimizers.append(opt)
-            elif team == "KR":
-                kr_optimizers.append(opt)
+        # 有消耗的按消耗降序排行, 零消耗的沉底
+        active = sorted(
+            [o for o in optimizer_weekly if o.get("spend", 0) > 0],
+            key=lambda o: o.get("spend", 0), reverse=True
+        )
+        inactive = [o for o in optimizer_weekly if o.get("spend", 0) <= 0]
 
-        # CN 团队
-        if cn_optimizers:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "🇨🇳 **CN团队**"}})
-            for i, opt in enumerate(cn_optimizers[:14]):
-                self._add_optimizer_row(elements, i, opt, roas_green, roas_yellow)
+        for i, opt in enumerate(active):
+            self._add_optimizer_row(elements, i, opt, roas_green, roas_yellow)
 
-        # KR 团队
-        if kr_optimizers:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "🇰🇷 **KR团队**"}})
-            for i, opt in enumerate(kr_optimizers[:7]):
-                self._add_optimizer_row(elements, i, opt, roas_green, roas_yellow)
+        for j, opt in enumerate(inactive):
+            self._add_optimizer_row(elements, len(active) + j, opt, roas_green, roas_yellow)
 
         elements.append({"tag": "hr"})
 
@@ -1750,7 +1741,9 @@ class LarkBot:
 
         # 评级
         rating = ""
-        if index == 0 and roas >= roas_green:
+        if spend <= 0:
+            rating = "⏸️ 本周未投放"
+        elif index == 0 and roas >= roas_green:
             rating = "🌟 MVP"
         elif roas_change > 0.05:
             rating = f"📈 +{roas_change:.1%}"

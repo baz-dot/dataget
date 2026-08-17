@@ -3851,7 +3851,7 @@ class BigQueryUploader:
             GROUP BY kst_date
         )
         SELECT
-            t.optimizer,
+            LOWER(t.optimizer) as optimizer,
             SUM(t.spend) as spend,
             SUM(t.mmp_total_revenue) as revenue,
             SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas,
@@ -3859,7 +3859,7 @@ class BigQueryUploader:
         FROM `{table_ref}` t
         JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
         WHERE t.optimizer IS NOT NULL AND t.optimizer != ''
-        GROUP BY t.optimizer
+        GROUP BY LOWER(t.optimizer)
         ORDER BY spend DESC
         """
 
@@ -3872,13 +3872,13 @@ class BigQueryUploader:
             GROUP BY kst_date
         )
         SELECT
-            t.optimizer,
+            LOWER(t.optimizer) as optimizer,
             SUM(t.spend) as spend,
             SAFE_DIVIDE(SUM(t.mmp_total_revenue), SUM(t.spend)) as roas
         FROM `{table_ref}` t
         JOIN daily_batches b ON t.kst_date = b.kst_date AND t.batch_id = b.batch_id
         WHERE t.optimizer IS NOT NULL AND t.optimizer != ''
-        GROUP BY t.optimizer
+        GROUP BY LOWER(t.optimizer)
         """
 
         # 6. 本周剧集数据
