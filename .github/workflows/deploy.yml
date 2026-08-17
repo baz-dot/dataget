@@ -1,5 +1,6 @@
 name: Deploy to Cloud Run
 
+# 注: 本文件在 scheduler 的 paths-filter 触发路径里, 修改它会触发 scheduler 重新部署
 on:
   push:
     branches: [main]
