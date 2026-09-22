@@ -141,6 +141,8 @@ rows = response.body.result.values or []   # List[Dict]
 无投手行(自然量)按 channel 拉,不够再按 drama_id 细分
 ```
 
+投手之间**并发拉取**(默认 4 线程,`DBT_FETCH_WORKERS` 可调),投手内部的降级细分保持串行。每个线程各建一个 SDK Client,不共用。一天约 140~220 次 API 调用,串行时耗时 5~8 分钟且随跨境网络延迟波动,曾多次撞到 Cloud Run 10 分钟任务超时;并发后控制在 2~3 分钟内。不建议超过 8 线程,阿里云侧会返回更多 503。
+
 ### 5.2 过滤值必须用底层原始值
 
 数据集显示值和底层存储值不一致:显示 `Meta`,过滤条件必须传小写 **`meta`**,传 `Meta` 会静默返回 0 行。切片前先用 DimCount API 拿当天真实维度值,渠道统一 `.lower()` 后再当过滤条件。
@@ -155,7 +157,9 @@ rows = response.body.result.values or []   # List[Dict]
 
 ### 5.5 重试策略
 
-对 `503` / `ServiceUnavailable` / `timeout` / `Datasource.Sql.ExecuteFailed` 做指数退避重试(10s / 30s / 60s,最多 3 次)。
+对 `503` / `ServiceUnavailable` / `timeout` / `Datasource.Sql.ExecuteFailed` / `Connection reset` / `Connection aborted` / `RemoteDisconnected` 做指数退避重试(10s / 30s / 60s,最多 3 次)。
+
+后三类是跨境链路(GCP 首尔 → 阿里云杭州)不稳时的典型症状,SDK 把它们包装成 `UnretryableException` 直接抛出,必须在 SDK 外层按错误信息识别后重试。所有调用都是只读查询,重试不会产生重复数据。Cloud Run 任务超时设为 15 分钟(`--max-retries 2`,最坏 45 分钟,不会和下一个整点任务重叠)。
 
 ### 5.6 数据新鲜度与成熟度
 

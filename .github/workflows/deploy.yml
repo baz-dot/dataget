@@ -91,7 +91,7 @@ jobs:
             --service-account ${{ env.SERVICE_ACCOUNT }} \
             --memory 1Gi \
             --cpu 1 \
-            --task-timeout 10m \
+            --task-timeout 15m \
             --max-retries 2 \
             --set-env-vars "GCS_BUCKET_NAME=xmp_raw_data_storage" \
             --set-env-vars "BQ_PROJECT_ID=${{ env.PROJECT_ID }}" \
@@ -111,7 +111,7 @@ jobs:
             --service-account ${{ env.SERVICE_ACCOUNT }} \
             --memory 1Gi \
             --cpu 1 \
-            --task-timeout 10m \
+            --task-timeout 15m \
             --max-retries 2 \
             --set-env-vars "GCS_BUCKET_NAME=xmp_raw_data_storage" \
             --set-env-vars "BQ_PROJECT_ID=${{ env.PROJECT_ID }}" \

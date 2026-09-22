@@ -5,10 +5,13 @@ Quick BI dbt 数据服务采集器
 核心机制:
 1. 明细 API 单次返回上限 1 万行, dbt 数据集一天 6-9 万输出行, 必须切片拉取
    切片降级链: 投手 -> 投手+渠道 -> 投手+渠道+剧目
+   投手之间并发拉取 (DBT_FETCH_WORKERS, 默认 4 线程, 每线程独立 SDK client), 投手内部串行
 2. 过滤值必须用底层原始值: 渠道显示值 Meta 对应过滤值 meta (小写)
 3. 拉取完成后用聚合 API 校验 spend 总额, 差异 >0.5% 视为不完整, 拒绝落库
 4. country_code 显示值为英文全名混 ISO 码, 统一归一化为 ISO-2 码
 5. 日期口径: kst_date (韩国时区 UTC+9), batch_id 也用 KST 时间生成
+6. 跨境链路 (GCP 首尔 -> 阿里云杭州) 不稳时连接会被重置, SDK 包装成 UnretryableException,
+   在 SDK 外层按错误信息识别后重试 (只读查询, 重试不产生重复数据)
 
 用法:
     python quickbi/dbt_fetcher.py            # 拉取 KST 今天并落库
@@ -20,6 +23,8 @@ import os
 import sys
 import json
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from typing import Dict, List, Optional
@@ -58,6 +63,27 @@ TRUNCATION_THRESHOLD = 9990
 # Agg 校验允许的 spend 相对差异
 VERIFY_TOLERANCE = 0.005
 
+# 出现这些片段的错误视为暂时性故障, 退避后重试. 后三类是跨境链路被重置的典型症状
+RETRYABLE_ERROR_MARKERS = (
+    '503', 'ServiceUnavailable', 'timeout', 'Datasource.Sql.ExecuteFailed',
+    'Connection reset', 'Connection aborted', 'RemoteDisconnected',
+)
+RETRY_DELAYS = [10, 30, 60]
+
+
+def is_retryable_error(msg: str) -> bool:
+    """按错误信息判断是否值得重试 (SDK 把连接类错误一律包装成 UnretryableException, 不能靠异常类型)"""
+    low = msg.lower()
+    return any(marker.lower() in low for marker in RETRYABLE_ERROR_MARKERS)
+
+
+def fetch_workers() -> int:
+    """投手级并发线程数, 环境变量 DBT_FETCH_WORKERS, 默认 4, 至少 1"""
+    try:
+        return max(1, int(os.getenv('DBT_FETCH_WORKERS', '4')))
+    except ValueError:
+        return 4
+
 # 明细 API 返回的数值字段 (比率类字段 CPI/d24h_roas/media_roas 等不落库, 下游按聚合重算)
 METRIC_FIELDS = [
     'spend', 'impression', 'clicks',
@@ -75,13 +101,23 @@ class DbtFetcher:
     """dbt 数据服务采集器"""
 
     def __init__(self):
-        self.client = Client(Config(
+        self._config = Config(
             access_key_id=os.getenv('ALIYUN_ACCESS_KEY_ID'),
             access_key_secret=os.getenv('ALIYUN_ACCESS_KEY_SECRET'),
             endpoint='quickbi-public.cn-hangzhou.aliyuncs.com',
-        ))
+        )
         self.runtime = RuntimeOptions(read_timeout=180000, connect_timeout=30000)
+        # SDK client 未声明线程安全, 每个线程各持一个
+        self._local = threading.local()
+        self._calls_lock = threading.Lock()
         self.api_calls = 0
+
+    def _get_client(self) -> Client:
+        client = getattr(self._local, 'client', None)
+        if client is None:
+            client = Client(self._config)
+            self._local.client = client
+        return client
 
     # ---------- 底层调用 ----------
 
@@ -93,20 +129,18 @@ class DbtFetcher:
             conditions.update(extra)
         request = models.QueryDataServiceRequest(api_id=api_id, conditions=json.dumps(conditions))
 
-        retry_delays = [10, 30, 60]
         for attempt in range(max_retries):
             try:
-                self.api_calls += 1
-                response = self.client.query_data_service_with_options(request, self.runtime)
+                with self._calls_lock:
+                    self.api_calls += 1
+                response = self._get_client().query_data_service_with_options(request, self.runtime)
                 if response.body.result:
                     return response.body.result.values or []
                 return []
             except Exception as e:
                 msg = str(e)
-                retryable = ('503' in msg or 'ServiceUnavailable' in msg
-                             or 'timeout' in msg.lower() or 'Datasource.Sql.ExecuteFailed' in msg)
-                if retryable and attempt < max_retries - 1:
-                    delay = retry_delays[attempt]
+                if is_retryable_error(msg) and attempt < max_retries - 1:
+                    delay = RETRY_DELAYS[attempt]
                     logger.warning(f"API {api_id} 暂时不可用, {delay}s 后重试 ({attempt + 1}/{max_retries}): {msg[:150]}")
                     time.sleep(delay)
                     continue
@@ -142,10 +176,14 @@ class DbtFetcher:
         empty_opt_channels = sorted({(d['channel'] or '').lower() for d in dim
                                      if not d.get('optimizer') and d.get('channel')})
 
-        # 3. 按投手切片, 撞上限自动降级
+        # 3. 按投手切片, 撞上限自动降级; 投手之间并发, 结果按投手顺序拼接保证稳定
         rows: List[Dict] = []
-        for opt in optimizers:
-            rows.extend(self._pull_sliced(date, {'optimizer': opt}, ['channel', 'drama_id'], dim))
+        workers = min(fetch_workers(), len(optimizers)) or 1
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='dbt-pull') as pool:
+            for part in pool.map(
+                    lambda opt: self._pull_sliced(date, {'optimizer': opt}, ['channel', 'drama_id'], dim),
+                    optimizers):
+                rows.extend(part)
 
         # 4. 无投手行 (自然量/未映射 campaign 的延迟归因收入, spend 通常为 0)
         for ch in empty_opt_channels:
