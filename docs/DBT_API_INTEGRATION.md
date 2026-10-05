@@ -194,6 +194,14 @@ today   = kst_now.strftime('%Y%m%d')
 | 08:00 / 09:40 | T-1 定稿采集 |
 | 10:00 | 日报 |
 
+采集由 Cloud Scheduler(`asia-northeast3`)触发,时区均为 `Asia/Seoul`。这三个任务不在 CI 管理范围内,改动要直接用 `gcloud scheduler jobs update http`:
+
+| 任务 | cron (KST) | 触发的 Cloud Run job |
+|---|---|---|
+| `quickbi-data-scraper-scheduler` | `0 * * * *` | `quickbi-data-scraper`(拉 KST 今天,00 点班拉昨天) |
+| `quickbi-data-scraper-daily-scheduler` | `0 8 * * *` | `quickbi-data-scraper-daily`(`FETCH_YESTERDAY=true`) |
+| `quickbi-data-scraper-daily-morning-scheduler` | `40 9 * * *` | 同上 |
+
 三个时间不要混:**采集时刻**(批次号)、**上游产出时刻**(`batched_time`,卡片上显示为"数据截至")、
 **数据覆盖范围**(上游批次产出时刻往前约半小时到一小时)。
 
