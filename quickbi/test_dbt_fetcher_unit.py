@@ -14,7 +14,9 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from quickbi import dbt_fetcher
-from quickbi.dbt_fetcher import DbtFetcher, is_retryable_error
+from datetime import datetime
+
+from quickbi.dbt_fetcher import DbtFetcher, is_retryable_error, resolve_fetch_date
 
 
 class RetryableErrorTest(unittest.TestCase):
@@ -98,6 +100,39 @@ class ConcurrentFetchTest(unittest.TestCase):
             self.assertEqual(dbt_fetcher.fetch_workers(), 4)
         with patch.dict(os.environ, {'DBT_FETCH_WORKERS': '0'}):
             self.assertEqual(dbt_fetcher.fetch_workers(), 1)
+
+
+class ResolveFetchDateTest(unittest.TestCase):
+    """采集日期规则: KST 00 点这一班拉昨天 (日切班), 其余整点拉今天"""
+
+    def test_midnight_run_fetches_the_day_that_just_ended(self):
+        for minute in (0, 3, 59):
+            date, mode = resolve_fetch_date(datetime(2026, 10, 5, 0, minute))
+            self.assertEqual(date, '20261004', f'KST 00:{minute:02d}')
+            self.assertEqual(mode, '日切班')
+
+    def test_other_hours_fetch_today(self):
+        for hour in (1, 9, 10, 23):
+            date, mode = resolve_fetch_date(datetime(2026, 10, 5, hour, 0))
+            self.assertEqual(date, '20261005', f'KST {hour:02d}:00')
+            self.assertEqual(mode, '当天')
+
+    def test_last_minute_of_day_still_fetches_today(self):
+        date, _ = resolve_fetch_date(datetime(2026, 10, 4, 23, 59))
+        self.assertEqual(date, '20261004')
+
+    def test_explicit_date_wins_over_everything(self):
+        date, mode = resolve_fetch_date(datetime(2026, 10, 5, 0, 3), argv_date='20260807', fetch_yesterday=True)
+        self.assertEqual((date, mode), ('20260807', '指定日期'))
+
+    def test_fetch_yesterday_flag_at_any_hour(self):
+        for hour in (0, 8, 9, 15):
+            date, mode = resolve_fetch_date(datetime(2026, 10, 5, hour, 40), fetch_yesterday=True)
+            self.assertEqual((date, mode), ('20261004', 'T-1'), f'KST {hour:02d}:40')
+
+    def test_month_boundary(self):
+        date, _ = resolve_fetch_date(datetime(2026, 11, 1, 0, 2))
+        self.assertEqual(date, '20261031')
 
 
 if __name__ == '__main__':

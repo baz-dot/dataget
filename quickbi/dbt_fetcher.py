@@ -12,9 +12,10 @@ Quick BI dbt 数据服务采集器
 5. 日期口径: kst_date (韩国时区 UTC+9), batch_id 也用 KST 时间生成
 6. 跨境链路 (GCP 首尔 -> 阿里云杭州) 不稳时连接会被重置, SDK 包装成 UnretryableException,
    在 SDK 外层按错误信息识别后重试 (只读查询, 重试不产生重复数据)
+7. 日切班: KST 00 点这一班拉 KST 昨天 (见 resolve_fetch_date), 供 00:10 收官播报使用
 
 用法:
-    python quickbi/dbt_fetcher.py            # 拉取 KST 今天并落库
+    python quickbi/dbt_fetcher.py            # 拉取 KST 今天并落库 (KST 00 点这一班拉昨天)
     python quickbi/dbt_fetcher.py 20260807   # 拉取指定日期并落库
     FETCH_YESTERDAY=true python quickbi/dbt_fetcher.py  # 拉取 KST 昨天 (日报 T-1)
 """
@@ -27,7 +28,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -310,15 +311,33 @@ class DbtFetcher:
             return None
 
 
+def resolve_fetch_date(now_kst: datetime, argv_date: Optional[str] = None,
+                       fetch_yesterday: bool = False) -> Tuple[str, str]:
+    """
+    决定本次采集哪一天 (KST), 返回 (YYYYMMDD, 模式)
+
+    KST 00 点这一班是日切班: 新的一天刚开始, 按"今天"去拉必然 0 行空跑, 而刚结束的那一天
+    还停在 23:00 班的批次上。所以这一班改拉昨天, 00:03 前后落库, 供 00:10 收官播报使用。
+    """
+    if argv_date:
+        return argv_date, '指定日期'
+    yesterday = (now_kst - timedelta(days=1)).strftime('%Y%m%d')
+    if fetch_yesterday:
+        return yesterday, 'T-1'
+    if now_kst.hour == 0:
+        return yesterday, '日切班'
+    return now_kst.strftime('%Y%m%d'), '当天'
+
+
 def main():
-    """采集入口: 拉取指定日期 (默认 KST 今天) 并落库 BigQuery"""
-    if len(sys.argv) > 1:
-        date = sys.argv[1]
-    elif os.getenv('FETCH_YESTERDAY', '').lower() == 'true':
-        date = (datetime.now(KST_TZ) - timedelta(days=1)).strftime('%Y%m%d')
-        logger.info(f"[T-1 模式] 采集 KST 昨天: {date}")
-    else:
-        date = datetime.now(KST_TZ).strftime('%Y%m%d')
+    """采集入口: 拉取指定日期 (默认 KST 今天, KST 00 点这一班拉昨天) 并落库 BigQuery"""
+    date, mode = resolve_fetch_date(
+        datetime.now(KST_TZ),
+        argv_date=sys.argv[1] if len(sys.argv) > 1 else None,
+        fetch_yesterday=os.getenv('FETCH_YESTERDAY', '').lower() == 'true',
+    )
+    if mode != '当天':
+        logger.info(f"[{mode}] 采集 KST {date}")
 
     fetcher = DbtFetcher()
     rows = fetcher.fetch_campaign_day(date)

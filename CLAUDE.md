@@ -36,11 +36,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 调度系统
 
 - `scheduler.py` - 主调度器 (BrainScheduler),整合规则引擎和消息推送
-  - 调度触发时刻用北京时间,**数据日期一律用 KST**(kst_date 口径,日切=北京 23:00,用 `kst_now()`)
-  - 日报: 每日 09:00 (T-1 = KST 昨天)
-  - 实时播报: 每日 09:10-22:10 每小时 (KST 当天)
-  - 收官播报: 每日 23:10 (= KST 00:10,播 KST 昨日全天定稿)
-  - 周报: 每周一 09:30
+  - **dbt/QuickBI 链路的调度时刻、数据日期、显示时间一律用 KST**(KST = 北京时间 + 1 小时,日切 = KST 00:00,用 `kst_now()`)
+  - 调度时刻集中写在 `scheduler.py` 顶部的 KST 时刻表里,注册时换算成进程本地时间;**不要改进程时区**(XMP 素材线共用同一服务,是北京口径)
+  - 日报: 每日 KST 10:00 (T-1 = KST 昨天)
+  - 实时播报: 每日 KST 10:10-23:10 每小时 (KST 当天,用 HH:00 采集、HH:03 落库的批次)
+  - 收官播报: 每日 KST 00:10 (播 KST 昨日,用 00:00 班采集的批次;最多等该批次 10 分钟)
+  - 实时播报静默时段: KST 01:00-09:59
+  - 周报: 每周一 KST 10:30
+  - XMP 统计同步 (每日 02:00) / drama 映射同步 (周一 02:30) 属素材线,仍为北京时间
 
 ### 规则引擎
 
@@ -188,7 +191,7 @@ python check_yesterday_comparison.py  # 检查昨日对比数据
 
 **quickbi_campaigns 表** (核心表):
 - `batch_id`: 批次ID (格式: YYYYMMDD_HHMMSS, **KST 时间**),用于区分不同时间点的数据
-- `kst_date`: 统计日期 (KST 口径,日切=北京 23:00)
+- `kst_date`: 统计日期 (KST 口径,日切 = KST 00:00)
 - `campaign_id/name`, `campaign_status`: 广告系列标识与状态 (Active/Stopped)
 - `optimizer`: 投手名称
 - `drama_id/name`: 剧集标识
@@ -207,7 +210,9 @@ python check_yesterday_comparison.py  # 检查昨日对比数据
 **关键查询逻辑**:
 - 日报: 查询 T-1 (KST 昨天) 最新 batch_id 的数据
 - 实时播报: 查询 KST 当日最新 batch_id 的数据
-- 收官播报 (北京 23:10): 查询 KST 昨日最新 batch (全天定稿)
+- 收官播报 (KST 00:10): 查询 KST 昨日最新 batch。该批次由 KST 00:00 班采集写入(这一班拉 KST 昨天),
+  内容是上游 KST 23:3x 产出的批次,覆盖到约 23:00,完整度约 96%;次日 T-1 定稿采集补齐,日报才是定稿
+- 采集日期规则 (`quickbi/dbt_fetcher.py`): KST 00 点这一班拉 KST 昨天,其余整点拉 KST 今天
 - 环比: 比较当前 batch_id 和上一个 batch_id
 - 所有"今天/昨天"计算必须用 `kst_now()`, 禁止 `datetime.now()`
 

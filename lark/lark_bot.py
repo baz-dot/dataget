@@ -11,17 +11,24 @@ import hmac
 import time
 import os
 import sys
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 
-def dual_time_label(kst_hhmm: str) -> str:
-    """KST 'HH:MM' -> '北京 HH:MM · KST HH:MM' 双时区标签 (北京 = KST - 1h)"""
+def kst_now() -> datetime:
+    """KST (UTC+9) 墙上时间。dbt/QuickBI 链路的显示时间一律用 KST, 并带 KST 字样"""
+    return datetime.utcnow() + timedelta(hours=9)
+
+
+def format_data_asof(batched_time: Optional[str]) -> Optional[str]:
+    """上游批次戳 'YYYYMMDD HH:MM:SS' (KST) -> 'KST MM-DD HH:MM'; 缺失或无法解析返回 None"""
+    if not batched_time:
+        return None
     try:
-        h, m = kst_hhmm.split(':')
-        bj_h = (int(h) - 1) % 24
-        return f"{bj_h:02d}:{m} · KST {kst_hhmm}"
-    except (ValueError, AttributeError):
-        return kst_hhmm
+        t = datetime.strptime(batched_time, '%Y%m%d %H:%M:%S')
+    except (ValueError, TypeError):
+        return None
+    return f"KST {t:%m-%d %H:%M}"
 
 # 导入日志模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -398,7 +405,7 @@ class LarkBot:
         content = [
             {"label": "告警类型", "value": alert_type},
             {"label": "告警内容", "value": message},
-            {"label": "告警时间", "value": time.strftime("%Y-%m-%d %H:%M:%S")},
+            {"label": "告警时间", "value": f"{kst_now():%Y-%m-%d %H:%M:%S} KST"},
         ]
 
         return self.send_card(
@@ -1294,7 +1301,7 @@ class LarkBot:
         optimizer = data.get("optimizer", "")
 
         elements = [
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**检测时间:** {time.strftime('%H:%M')}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**检测时间:** KST {kst_now():%H:%M}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**对象:** 剧集《{drama_name}》 / Campaign ID: {campaign_id}"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**当前数据:**"}},
@@ -1358,7 +1365,7 @@ class LarkBot:
         optimizer = data.get("optimizer", "")
 
         elements = [
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**检测时间:** {time.strftime('%H:%M')}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**检测时间:** KST {kst_now():%H:%M}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**对象:** 剧集《{drama_name}》 / Campaign ID: {campaign_id}"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**当前数据:**"}},
@@ -2004,7 +2011,7 @@ class LarkBot:
         """
         from config.roas_thresholds import evaluate_realtime_roas_green_status
 
-        current_hour = data.get("current_hour", time.strftime("%H:%M"))
+        current_hour = data.get("current_hour", kst_now().strftime("%H:%M"))  # KST
         summary = data.get("summary", {})
         data_delayed = data.get("data_delayed", False)
         optimizer_spend = data.get("optimizer_spend", [])
@@ -2102,6 +2109,11 @@ class LarkBot:
         elements.append({"tag": "hr"})
 
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**⏰ 实时战报**"}})
+
+        # 这批数据在上游的产出时刻: 播报时刻 ≠ 数据时刻, 明示出来避免误读
+        data_asof = format_data_asof(data.get("upstream_batched_time"))
+        if data_asof:
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"• 数据截至：**{data_asof}**（上游产出时间）"}})
 
         # 消耗 + 日环比
         spend_daily_str = ""
@@ -2499,7 +2511,7 @@ class LarkBot:
             "msg_type": "interactive",
             "card": {
                 "header": {
-                    "title": {"tag": "plain_text", "content": f"⏰ 实时战报 [{dual_time_label(current_hour)}]"},
+                    "title": {"tag": "plain_text", "content": f"⏰ 实时战报 [KST {current_hour}]"},
                     "template": color
                 },
                 "elements": elements

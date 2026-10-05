@@ -650,6 +650,39 @@ class BigQueryUploader:
             logger.warning(f"查询上游 batched_time 失败: {e}")
             return None
 
+    def get_batch_upstream_time(self, batch_id: Optional[str], table_id: str = "dbt_overview") -> Optional[str]:
+        """
+        指定采集批次对应的上游 ETL 批次戳 ('YYYYMMDD HH:MM:SS', KST)
+
+        即这批数据在上游的产出时刻, 播报卡片上显示为"数据截至"。无记录或查询失败返回 None。
+        """
+        if not batch_id:
+            return None
+        table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
+        query = f"""
+        SELECT batched_time
+        FROM `{table_ref}`
+        WHERE batch_id = '{batch_id}' AND batched_time != ''
+        LIMIT 1
+        """
+        try:
+            for row in self.client.query(query).result():
+                return row.batched_time
+            return None
+        except Exception as e:
+            logger.warning(f"查询批次 {batch_id} 的上游 batched_time 失败: {e}")
+            return None
+
+    def get_latest_batch_id(self, kst_date: str, table_id: str = None, dataset_id: str = None) -> Optional[str]:
+        """指定 KST 日期 (YYYY-MM-DD) 的最新批次号, 不限批次号自身的日期; 无数据返回 None"""
+        from config.data_source import get_data_source_config
+
+        if table_id is None or dataset_id is None:
+            config = get_data_source_config()
+            table_id = table_id or config["table_id"]
+            dataset_id = dataset_id or config["dataset_id"]
+        return self._get_absolute_latest_batch_id(f"{self.project_id}.{dataset_id}.{table_id}", kst_date)
+
     def upload_quickbi_campaigns(self, data: List[Dict], table_id: str = "quickbi_campaigns", batch_id: str = None) -> int:
         """
         上传 Quick BI 广告数据到 BigQuery（单表模式）
@@ -2099,6 +2132,8 @@ class BigQueryUploader:
             api_update_time = datetime.strptime(batch_time_str, '%Y%m%d%H%M%S')  # batch_id 为 KST 时间
             result["api_update_time"] = api_update_time.strftime('%Y-%m-%d %H:%M:%S')
             result["batch_time"] = api_update_time.strftime('%H:%M')  # 当前batch时间点 (KST)
+            # 这批数据在上游的产出时刻 (卡片"数据截至")
+            result["upstream_batched_time"] = self.get_batch_upstream_time(batch_id)
 
             # 检查数据延迟 - 仅对 KST 当天的实时查询有意义;
             # 查历史日期(收官播报)时, 全天最后批次必然是 23 点的, 不属于延迟
