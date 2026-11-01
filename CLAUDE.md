@@ -43,7 +43,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - 收官播报: 每日 KST 00:10 (播 KST 昨日,用 00:00 班采集的批次;最多等该批次 10 分钟)
   - 实时播报静默时段: KST 01:00-09:59
   - 周报: 每周一 KST 10:30
-  - XMP 统计同步 (每日 02:00) / drama 映射同步 (周一 02:30) 属素材线,仍为北京时间
+  - drama 映射同步 (周一 02:30) 属素材线,仍为北京时间
+  - XMP 统计同步: **已暂停** (`XMP_STATS_SYNC_ENABLED = False`,2026-11-01)。它写 `quickbi_data`,而周报和 XMP 报表读 `xmp_data`,
+    产出没有下游在用;手动跑用 `--mode xmp-stats`。恢复时经 `_run_in_background` 走独立线程:
+    调度是单线程的,长任务不能跑在调度线程上,否则后面的播报全部发不出去
 
 ### 规则引擎
 

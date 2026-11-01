@@ -8,6 +8,7 @@ KST 统一调度 单元测试 (不访问网络 / BigQuery / 飞书, 不依赖 py
 import json
 import os
 import sys
+import threading
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -76,7 +77,6 @@ class RegistrationTest(unittest.TestCase):
         | {('send_personal_reports', None, f'{h:02d}:15') for h in range(9, 23)}
         | {('send_weekly_report', 'monday', '09:30')}
         | {('sync_drama_mapping', 'monday', '02:30')}
-        | {('sync_xmp_stats', None, '02:00')}
     )
 
     def test_beijing_process_fires_at_exactly_the_legacy_times(self):
@@ -89,12 +89,83 @@ class RegistrationTest(unittest.TestCase):
         self.assertIn(('send_realtime_report', None, '23:10'), jobs)
         self.assertIn(('send_weekly_report', 'monday', '10:30'), jobs)
         # 素材线任务是进程本地时间, 不随 KST 时刻表换算
-        self.assertIn(('sync_xmp_stats', None, '02:00'), jobs)
         self.assertIn(('sync_drama_mapping', 'monday', '02:30'), jobs)
 
     def test_weekly_report_weekday_follows_when_conversion_crosses_midnight(self):
         # 进程在 UTC-5: KST 周一 10:30 = 本地周日 20:30
         self.assertIn(('send_weekly_report', 'sunday', '20:30'), _registered(H(-5)))
+
+
+class XmpStatsSyncTest(unittest.TestCase):
+    """XMP 同步不能再占用调度线程: 2026-11-01 它卡死 19 小时, 日报和实时播报全部发不出去"""
+
+    def test_sync_disabled_registration_omits_xmp_job(self):
+        """反例: 暂停期间定时任务里不能出现 XMP 同步"""
+        with patch.object(sched_mod, 'XMP_STATS_SYNC_ENABLED', False):
+            names = {name for name, _, _ in _registered(H(8))}
+        self.assertNotIn('sync_xmp_stats', names, '暂停期间不应注册 XMP 同步')
+        self.assertNotIn('_run_in_background', names, '暂停期间不应注册 XMP 同步')
+
+    def test_default_config_keeps_sync_paused(self):
+        """反例: 默认配置必须是暂停状态"""
+        self.assertFalse(sched_mod.XMP_STATS_SYNC_ENABLED, 'XMP 同步目前应暂停')
+
+    def test_sync_hangs_background_runner_returns_immediately(self):
+        """反例: 任务卡住时, 调用方不能被阻塞"""
+        s = BrainScheduler.__new__(BrainScheduler)
+        s._background_threads = {}
+        release = threading.Event()
+        started = threading.Event()
+
+        def stuck_job():
+            started.set()
+            release.wait(5)
+
+        thread = s._run_in_background(stuck_job)
+        try:
+            self.assertTrue(started.wait(2), '任务应在后台线程启动')
+            self.assertTrue(thread.is_alive(), '任务卡住时调用方应已返回')
+            self.assertIsNot(thread, threading.current_thread(), '任务不能跑在调度线程上')
+        finally:
+            release.set()
+            thread.join(2)
+
+    def test_previous_run_still_alive_second_call_skips(self):
+        """反例: 上一次还卡着时不能再起一个线程, 否则每天堆积一个"""
+        s = BrainScheduler.__new__(BrainScheduler)
+        s._background_threads = {}
+        release = threading.Event()
+        calls = []
+
+        def stuck_job():
+            calls.append(1)
+            release.wait(5)
+
+        first = s._run_in_background(stuck_job)
+        try:
+            self.assertIsNone(s._run_in_background(stuck_job), '上一次未结束时应跳过')
+            self.assertEqual(len(calls), 1, '不应启动第二个线程')
+        finally:
+            release.set()
+            first.join(2)
+
+    def test_previous_run_finished_second_call_starts_again(self):
+        """上一次结束后, 下一次可以正常启动"""
+        s = BrainScheduler.__new__(BrainScheduler)
+        s._background_threads = {}
+        calls = []
+        s._run_in_background(lambda: calls.append(1)).join(2)
+        second = s._run_in_background(lambda: calls.append(2))
+        self.assertIsNotNone(second, '上一次结束后应能再次启动')
+        second.join(2)
+        self.assertEqual(calls, [1, 2], '两次都应执行')
+
+    def test_sync_enabled_registration_uses_background_runner(self):
+        """恢复启用时必须走后台线程, 时刻仍是进程本地 02:00"""
+        with patch.object(sched_mod, 'XMP_STATS_SYNC_ENABLED', True):
+            jobs = _registered(H(8))
+        self.assertIn(('_run_in_background', None, '02:00'), jobs, '恢复后应经后台线程执行')
+        self.assertNotIn(('sync_xmp_stats', None, '02:00'), jobs, '不能直接跑在调度线程上')
 
 
 def _bare_scheduler(kst_time):

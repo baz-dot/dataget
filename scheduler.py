@@ -12,8 +12,9 @@ import os
 import sys
 import time
 import schedule
+import threading
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -43,6 +44,10 @@ KST_WEEKLY_REPORT = ("monday", "10:30") # 周报
 KST_QUIET_HOURS = range(1, 10)          # 实时播报静默时段: KST 当日数据尚未累积
 
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+# XMP 统计同步暂停: 写 quickbi_data, 而周报和 XMP 报表读 xmp_data, 产出没有下游在用,
+# 2026-11-01 还因 XMP 限流卡死 19 小时, 拖停了全部播报
+XMP_STATS_SYNC_ENABLED = False
 
 
 def kst_now() -> datetime:
@@ -117,6 +122,7 @@ class BrainScheduler:
         self.quickbi_uploader = BigQueryUploader(self.project_id, self.data_source_dataset)
         self._kst_now = kst_now
         self._sleep = time.sleep
+        self._background_threads: Dict[str, threading.Thread] = {}
 
         print(f"[Scheduler] 初始化完成")
         print(f"  - Project: {self.project_id}")
@@ -616,9 +622,34 @@ class BrainScheduler:
         # ---- 素材线: 北京口径, 进程本地时间, 不走 KST 时刻表 ----
         # 每周一 02:30 drama 映射同步（Google Sheets → BigQuery 回填）
         schedule.every().monday.at("02:30").do(self.sync_drama_mapping)
-        # 每日 02:00 XMP 投手/剪辑师统计同步 (统计前一天数据)
-        schedule.every().day.at("02:00").do(self.sync_xmp_stats)
-        print(f"[Scheduler] 素材线 (进程本地时间): 周一 02:30 drama 映射同步, 每日 02:00 XMP 统计同步")
+        print(f"[Scheduler] 素材线 (进程本地时间): 周一 02:30 drama 映射同步")
+        if XMP_STATS_SYNC_ENABLED:
+            # 每日 02:00 XMP 投手/剪辑师统计同步, 走独立线程, 卡住也不影响播报
+            schedule.every().day.at("02:00").do(self._run_in_background, self.sync_xmp_stats)
+            print(f"[Scheduler] 素材线 (进程本地时间): 每日 02:00 XMP 统计同步 (独立线程)")
+        else:
+            print(f"[Scheduler] XMP 统计同步已暂停")
+
+    def _run_in_background(self, job: Callable) -> Optional[threading.Thread]:
+        """
+        在独立线程运行任务, 立即返回
+
+        调度是单线程的, 任务不返回后面的播报就都轮不到。同一任务上次还没结束时跳过,
+        否则卡住后每天堆积一个线程。
+
+        Returns:
+            启动的线程; 因上次未结束而跳过时返回 None
+        """
+        name = getattr(job, '__name__', repr(job))
+        previous = self._background_threads.get(name)
+        if previous is not None and previous.is_alive():
+            print(f"[Scheduler] {name} 上次还未结束，跳过本次")
+            return None
+
+        thread = threading.Thread(target=job, name=f"bg-{name}", daemon=True)
+        self._background_threads[name] = thread
+        thread.start()
+        return thread
 
     def start_scheduler(self, interval_minutes: int = 60, skip_first_daily: bool = False, use_latest_batch: bool = False):
         """
