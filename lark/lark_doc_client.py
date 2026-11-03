@@ -24,7 +24,7 @@ except ImportError:
 logger = get_logger("dataget.lark_doc")
 
 # 团队分组配置 (与 lark_bot.py 保持一致)
-CN_TEAM = ["kimi", "silas", "zane", "kino", "hannibal", "bigzo", "echo", "felix", "jocelyn", "ponyo", "lulu", "alvin", "troy", "kendon"]
+CN_TEAM = ["hannibal", "kimi", "alvin", "rick", "domi", "bigzo", "richard", "ray", "ponyo", "kino"]
 KR_TEAM = ["juria", "jade", "lyla", "joy", "heida", "john", "robin"]
 
 def get_optimizer_team(optimizer_name: str) -> str:

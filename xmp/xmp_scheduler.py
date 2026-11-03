@@ -78,7 +78,7 @@ TOKEN_REFRESH_BEFORE_DAYS = 3
 # 投手名单 (英文名用于匹配 campaign_name 中的 optimizer-xxx)
 # 注: lyla, juria, jade 是韩国人不统计; eason 是剪辑师不是投手
 OPTIMIZER_LIST = [
-    "kimi", "silas", "zane", "kino", "hannibal", "bigzo", "echo", "felix", "jocelyn", "ponyo", "lulu", "alvin", "troy", "kendon"
+    "hannibal", "kimi", "alvin", "rick", "domi", "bigzo", "richard", "ray", "ponyo", "kino"
 ]
 
 # 剪辑师名单 (中文名 -> 可能的别名/英文名/姓氏)

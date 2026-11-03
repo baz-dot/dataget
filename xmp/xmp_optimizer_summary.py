@@ -19,7 +19,7 @@ XMP_SUMMARY_URL = "https://xmp-api.mobvista.com/admanage/channel/summary"
 
 # 投手列表
 OPTIMIZER_LIST = [
-    "echo", "felix", "hannibal", "kimi", "kino", "silas", "zane"
+    "hannibal", "kimi", "alvin", "rick", "domi", "bigzo", "richard", "ray", "ponyo", "kino"
 ]
 
 # 渠道配置
